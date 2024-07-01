@@ -1,0 +1,19 @@
+defaults:
+  - base
+
+data:
+  cluster_path: null
+
+diffuser:
+  diffuse_rot: False
+
+experiment:
+  name: mof_translation
+  num_epoch: 95
+  batch_size: 2
+  max_squared_res: 300000
+  rot_loss_t_threshold: 0.0
+  rot_loss_weight: 1.0
+  separate_rot_loss: False
+  sample_mode: time_batch
+  aux_loss_weight: null

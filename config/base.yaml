@@ -99,7 +99,7 @@ experiment:
   # Checkpoint directory to warm start from.
   warm_start: null
   use_warm_start_conf: False
-  ckpt_dir: ./ckpt/
+  ckpt_dir: ckpt/
 
   # Loss weights.
   trans_loss_weight: 1.0
@@ -115,14 +115,14 @@ experiment:
   aux_loss_weight: 0.25
 
   # Evaluation.
-  eval_dir: ./eval_outputs
+  eval_dir: eval_outputs/
   noise_scale: 1.0
   # Filled in during training.
   num_parameters: null
 
 hydra:
   run:
-    dir: ${oc.env:HYDRA_JOBS}/${experiment.name}/
+    dir: ${oc.env:HYDRA_JOBS}/${experiment.name}
   sweeper:
     params:
       # Example of hydra multi run and wandb.
