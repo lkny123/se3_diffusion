@@ -121,6 +121,8 @@ experiment:
   num_parameters: null
 
 hydra:
+  run:
+    dir: ${oc.env:HYDRA_JOBS}/${experiment.name}/
   sweeper:
     params:
       # Example of hydra multi run and wandb.
