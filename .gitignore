@@ -86,6 +86,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+notebooks/
 
 # IPython
 profile_default/
@@ -182,3 +183,6 @@ pynb/
 
 #slurm_output for record
 slurm_output/
+
+# logs
+/logs/
