@@ -142,12 +142,13 @@ class Experiment:
             self._optimizer.load_state_dict(ckpt_opt)
 
         dt_string = datetime.now().strftime("%dD_%mM_%YY_%Hh_%Mm_%Ss")
+        hydra_dir = HydraConfig.get().run.dir
         if self._exp_conf.ckpt_dir is not None:
             # Set-up checkpoint location
             ckpt_dir = os.path.join(
+                hydra_dir,
                 self._exp_conf.ckpt_dir,
-                self._exp_conf.name,
-                dt_string)
+            )
             if not os.path.exists(ckpt_dir):
                 os.makedirs(ckpt_dir, exist_ok=True)
             self._exp_conf.ckpt_dir = ckpt_dir
@@ -156,9 +157,9 @@ class Experiment:
             self._log.info('Checkpoint not being saved.')
         if self._exp_conf.eval_dir is not None :
             eval_dir = os.path.join(
+                hydra_dir,
                 self._exp_conf.eval_dir,
-                self._exp_conf.name,
-                dt_string)
+            )
             self._exp_conf.eval_dir = eval_dir
             self._log.info(f'Evaluation saved to: {eval_dir}')
         else:
@@ -607,53 +608,57 @@ class Experiment:
 
 
         # Backbone atom loss
-        pred_atom37 = model_out['atom37'][:, :, :5]
-        gt_rigids = ru.Rigid.from_tensor_7(batch['rigids_0'].type(torch.float32))
-        gt_psi = batch['torsion_angles_sin_cos'][..., 2, :]
-        gt_atom37, atom37_mask, _, _ = all_atom.compute_backbone(
-            gt_rigids, gt_psi)
-        gt_atom37 = gt_atom37[:, :, :5]
-        atom37_mask = atom37_mask[:, :, :5]
+        if self._exp_conf.aux_loss_weight is None: # skip aux loss
+            bb_atom_loss = torch.zeros_like(rot_loss).to(rot_loss.device)
+            dist_mat_loss = torch.zeros_like(rot_loss).to(rot_loss.device)
+        else:
+            pred_atom37 = model_out['atom37'][:, :, :5]
+            gt_rigids = ru.Rigid.from_tensor_7(batch['rigids_0'].type(torch.float32))
+            gt_psi = batch['torsion_angles_sin_cos'][..., 2, :]
+            gt_atom37, atom37_mask, _, _ = all_atom.compute_backbone(
+                gt_rigids, gt_psi)
+            gt_atom37 = gt_atom37[:, :, :5]
+            atom37_mask = atom37_mask[:, :, :5]
 
-        gt_atom37 = gt_atom37.to(pred_atom37.device)
-        atom37_mask = atom37_mask.to(pred_atom37.device)
-        bb_atom_loss_mask = atom37_mask * loss_mask[..., None]
-        bb_atom_loss = torch.sum(
-            (pred_atom37 - gt_atom37)**2 * bb_atom_loss_mask[..., None],
-            dim=(-1, -2, -3)
-        ) / (bb_atom_loss_mask.sum(dim=(-1, -2)) + 1e-10)
-        bb_atom_loss *= self._exp_conf.bb_atom_loss_weight
-        bb_atom_loss *= batch['t'] < self._exp_conf.bb_atom_loss_t_filter
-        bb_atom_loss *= self._exp_conf.aux_loss_weight
+            gt_atom37 = gt_atom37.to(pred_atom37.device)
+            atom37_mask = atom37_mask.to(pred_atom37.device)
+            bb_atom_loss_mask = atom37_mask * loss_mask[..., None]
+            bb_atom_loss = torch.sum(
+                (pred_atom37 - gt_atom37)**2 * bb_atom_loss_mask[..., None],
+                dim=(-1, -2, -3)
+            ) / (bb_atom_loss_mask.sum(dim=(-1, -2)) + 1e-10)
+            bb_atom_loss *= self._exp_conf.bb_atom_loss_weight
+            bb_atom_loss *= batch['t'] < self._exp_conf.bb_atom_loss_t_filter
+            bb_atom_loss *= self._exp_conf.aux_loss_weight
 
-        # Pairwise distance loss
-        gt_flat_atoms = gt_atom37.reshape([batch_size, num_res*5, 3])
-        gt_pair_dists = torch.linalg.norm(
-            gt_flat_atoms[:, :, None, :] - gt_flat_atoms[:, None, :, :], dim=-1)
-        pred_flat_atoms = pred_atom37.reshape([batch_size, num_res*5, 3])
-        pred_pair_dists = torch.linalg.norm(
-            pred_flat_atoms[:, :, None, :] - pred_flat_atoms[:, None, :, :], dim=-1)
+            # Pairwise distance loss
+            gt_flat_atoms = gt_atom37.reshape([batch_size, num_res*5, 3])
+            gt_pair_dists = torch.linalg.norm(
+                gt_flat_atoms[:, :, None, :] - gt_flat_atoms[:, None, :, :], dim=-1)
+            pred_flat_atoms = pred_atom37.reshape([batch_size, num_res*5, 3])
+            pred_pair_dists = torch.linalg.norm(
+                pred_flat_atoms[:, :, None, :] - pred_flat_atoms[:, None, :, :], dim=-1)
 
-        flat_loss_mask = torch.tile(loss_mask[:, :, None], (1, 1, 5))
-        flat_loss_mask = flat_loss_mask.reshape([batch_size, num_res*5])
-        flat_res_mask = torch.tile(bb_mask[:, :, None], (1, 1, 5))
-        flat_res_mask = flat_res_mask.reshape([batch_size, num_res*5])
+            flat_loss_mask = torch.tile(loss_mask[:, :, None], (1, 1, 5))
+            flat_loss_mask = flat_loss_mask.reshape([batch_size, num_res*5])
+            flat_res_mask = torch.tile(bb_mask[:, :, None], (1, 1, 5))
+            flat_res_mask = flat_res_mask.reshape([batch_size, num_res*5])
 
-        gt_pair_dists = gt_pair_dists * flat_loss_mask[..., None]
-        pred_pair_dists = pred_pair_dists * flat_loss_mask[..., None]
-        pair_dist_mask = flat_loss_mask[..., None] * flat_res_mask[:, None, :]
+            gt_pair_dists = gt_pair_dists * flat_loss_mask[..., None]
+            pred_pair_dists = pred_pair_dists * flat_loss_mask[..., None]
+            pair_dist_mask = flat_loss_mask[..., None] * flat_res_mask[:, None, :]
 
-        # No loss on anything >6A
-        proximity_mask = gt_pair_dists < 6
-        pair_dist_mask  = pair_dist_mask * proximity_mask
+            # No loss on anything >6A
+            proximity_mask = gt_pair_dists < 6
+            pair_dist_mask  = pair_dist_mask * proximity_mask
 
-        dist_mat_loss = torch.sum(
-            (gt_pair_dists - pred_pair_dists)**2 * pair_dist_mask,
-            dim=(1, 2))
-        dist_mat_loss /= (torch.sum(pair_dist_mask, dim=(1, 2)) - num_res)
-        dist_mat_loss *= self._exp_conf.dist_mat_loss_weight
-        dist_mat_loss *= batch['t'] < self._exp_conf.dist_mat_loss_t_filter
-        dist_mat_loss *= self._exp_conf.aux_loss_weight
+            dist_mat_loss = torch.sum(
+                (gt_pair_dists - pred_pair_dists)**2 * pair_dist_mask,
+                dim=(1, 2))
+            dist_mat_loss /= (torch.sum(pair_dist_mask, dim=(1, 2)) - num_res)
+            dist_mat_loss *= self._exp_conf.dist_mat_loss_weight
+            dist_mat_loss *= batch['t'] < self._exp_conf.dist_mat_loss_t_filter
+            dist_mat_loss *= self._exp_conf.aux_loss_weight
 
         final_loss = (
             rot_loss
@@ -818,7 +823,7 @@ class Experiment:
         return ret
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="base")
+@hydra.main(version_base=None, config_path="../config", config_name="mof_translation")
 def run(conf: DictConfig) -> None:
 
     # Fixes bug in https://github.com/wandb/wandb/issues/1525
