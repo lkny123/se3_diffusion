@@ -15,7 +15,6 @@ import functools as fn
 
 from torch.utils import data
 from torch_geometric.data import Data
-from torch_geometric.utils import dense_to_sparse
 
 from data import utils as du
 
@@ -85,13 +84,9 @@ class MOFDataset(data.Dataset):
 
     def __getitem__(self, idx):
 
-        feats = {}
-
         data = self.cached_data[idx]
-        name = data.m_id
 
         rigids_0 = self.get_rigids_0(data)
-        feats['rigids_0'] = rigids_0
 
         # Use a fixed seed for evaluation.
         if self.is_training:
@@ -116,8 +111,9 @@ class MOFDataset(data.Dataset):
                 diffuse_mask=None,
                 as_tensor_7=True,
             )
-        feats.update(diff_feats_t)
-        feats['t'] = t
+
+        ######### CONSTRUCT GRAPH #########
+        lattice = torch.cat([data.lengths, data.angles]).numpy().flatten()
 
         # get coordinates, atom_types
         x_t = []
@@ -131,21 +127,61 @@ class MOFDataset(data.Dataset):
         
         atom_types = torch.cat(atom_types, dim=0)
         x_t = torch.cat(x_t, dim=0)
-        num_bb_atoms = [bb.num_atoms for bb in data.pyg_mols]
-        feats['atom_types'] = atom_types
-        feats['x_t'] = x_t
-        feats['num_bb_atoms'] = num_bb_atoms
 
-        # TODO: provide indices for bbs (for aggregation)
-        # TODO: what does du.pad_feats do? 
+        # get edge_indices, to_jimages
+        edge_indices, to_jimages = self.get_edge_indices(lattice, atom_types, x_t)
+
+        # TODO: number of edge indices changes even for fully connected graphs
         
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
-        feats = tree.map_structure(
-            lambda x: x if torch.is_tensor(x) else torch.tensor(x), feats)
-        if self.is_training:
-            return feats
-        else:
-            return feats, name
+        data = Data(
+            coords=torch.Tensor(x_t),
+            atom_types=torch.LongTensor(atom_types),
+            lengths=torch.Tensor(lattice[:3]).view(1, -1),
+            angles=torch.Tensor(lattice[3:]).view(1, -1),
+            edge_index=torch.LongTensor(
+                edge_indices.T).contiguous(),  # shape (2, num_edges)
+            to_jimages=torch.LongTensor(to_jimages),
+            num_atoms=data.num_atoms,
+            num_bbs=data.num_components,
+            num_bonds=edge_indices.shape[0],
+            num_nodes=data.num_atoms,  # special attribute used for batching in pytorch geometric
+            t=torch.Tensor([t]),
+            rigids_0=torch.Tensor(rigids_0),
+            rigids_t=torch.Tensor(diff_feats_t['rigids_t']),
+            trans_score=torch.Tensor(diff_feats_t['trans_score']),
+            rot_score=torch.Tensor(diff_feats_t['rot_score']),
+            trans_score_scaling=torch.tensor(diff_feats_t['trans_score_scaling'], dtype=torch.float32),
+            rot_score_scaling=torch.tensor(diff_feats_t['rot_score_scaling'], dtype=torch.float32),
+        )
+
+        return data
+
+    def get_edge_indices(self, lattice, atom_types, coords, cutoff=None):
+
+        structure_t = Structure(
+            lattice=Lattice.from_parameters(*lattice), 
+            species=atom_types.numpy(), 
+            coords=coords.numpy(),
+            coords_are_cartesian=True,
+        )
+        try:
+            graph_t = StructureGraph.with_local_env_strategy(
+                structure_t, CrystalNN
+            )
+        except:
+            tmp = local_env.CrystalNN(distance_cutoffs=cutoff, x_diff_weight=-1, porous_adjustment=False, search_cutoff=10)
+            graph_t = StructureGraph.with_local_env_strategy(
+                structure_t, tmp) 
+            
+        edge_indices, to_jimages = [], []
+        for i, j, to_jimage in graph_t.graph.edges(data='to_jimage'):
+            edge_indices.append([j, i])
+            to_jimages.append(to_jimage)
+            edge_indices.append([i, j])
+            to_jimages.append(tuple(-tj for tj in to_jimage))
+
+        return np.array(edge_indices), np.array(to_jimages)
 
 class TrainSampler(data.Sampler):
 
