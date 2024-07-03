@@ -3,6 +3,7 @@ defaults:
 
 data:
   cluster_path: null
+  cache_path: /home/nayoung/MOFDiff/data/csp/cif_10_100/val.pt
 
 diffuser:
   diffuse_rot: False
