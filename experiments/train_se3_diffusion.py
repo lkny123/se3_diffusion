@@ -27,6 +27,7 @@ import copy
 import random
 import pandas as pd
 
+from pathlib import Path
 from collections import defaultdict
 from collections import deque
 from datetime import datetime
@@ -46,6 +47,7 @@ from data import utils as du
 from data import all_atom
 from model import score_network
 from experiments import utils as eu
+from common.utils import PROJECT_ROOT
 
 
 class Experiment:
@@ -823,7 +825,7 @@ class Experiment:
         return ret
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="mof_translation")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "config"), config_name="mof_translation")
 def run(conf: DictConfig) -> None:
 
     # Fixes bug in https://github.com/wandb/wandb/issues/1525
