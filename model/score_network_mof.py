@@ -10,6 +10,8 @@ from data import all_atom
 from model import egnn
 import functools as fn
 
+from openfold.utils.rigid_utils import Rigid
+
 Tensor = torch.Tensor
 
 
@@ -127,20 +129,16 @@ class Embedder(nn.Module):
         # Set time step to epsilon=1e-5 for fixed residues.
         time_emb = torch.tile(
             self.timestep_embedder(t)[:, None, :], (1, num_atoms, 1)) # [B, N, D]
-        print(f"Time embedding shape: {time_emb.shape}")
         node_feats = [time_emb]
         pair_feats = [self._cross_concat(time_emb, num_batch, num_atoms)] # [B, N^2, 2*D]
-        print(f"Pair features shape: {pair_feats[0].shape}")
 
         # Atom type embeddings
         node_feats.append(self.atom_embedder(atom_types - 1))
-        print(f"Atom type embedding shape: {node_feats[-1].shape}")
 
         # Edge radius embeddings
         pairwise_dist = self._pairwise_distances(x_t) # [B, N, N]
         edge_feats = self.edge_distance_embedder(pairwise_dist) # [B*N*N, D]
         pair_feats.append(rearrange(edge_feats, '(B N1 N2) D -> B (N1 N2) D', B=num_batch, N1=num_atoms, N2=num_atoms))
-        print(f"Edge distance embedding shape: {pair_feats[-1].shape}")
 
         node_embed = self.node_embedder(torch.cat(node_feats, dim=-1).float())
         edge_embed = self.edge_embedder(torch.cat(pair_feats, dim=-1).float())
@@ -156,11 +154,9 @@ class ScoreNetwork(nn.Module):
 
         self.embedding_layer = Embedder(model_conf)
         self.diffuser = diffuser
-        self.score_model = egnn.EGNN(
-            in_node_nf=model_conf.node_embed_size,
-            hidden_nf=model_conf.hidden_dim,
-            out_node_nf=7,
-            in_edge_nf=model_conf.edge_embed_size,
+        self.score_model = egnn.EGNNScore(
+            model_conf=model_conf,
+            diffuser=diffuser,
         )
 
     def _apply_mask(self, aatype_diff, aatype_0, diff_mask):
@@ -177,33 +173,36 @@ class ScoreNetwork(nn.Module):
         Returns:
             model_out: dictionary of model outputs.
         """
+        batch_size, num_atoms = input_feats['atom_types'].shape
 
-        # Initial node and ege embeddings
+        # Initial node and edge embeddings
         init_node_embed, init_edge_embed = self.embedding_layer(
             atom_types=input_feats['atom_types'],
             t=input_feats['t'],
             x_t=input_feats['x_t'],
         )
-        print(f"Initial node embedding shape: {init_node_embed.shape}")
-        print(f"Initial edge embedding shape: {init_edge_embed.shape}")
-        assert False
+        node_embed = rearrange(init_node_embed, 'b n d -> (b n) d', b=batch_size, n=num_atoms)
 
-        # Run main network
-        model_out = self.score_model(node_embed, edge_embed, input_feats)
+        # Compute edge indices 
+        x_t = rearrange(input_feats['x_t'], 'b n d -> (b n) d', b=batch_size, n=num_atoms)
+        batch_vec = torch.arange(batch_size, device=x_t.device).repeat_interleave(num_atoms)
+        edge_index = radius_graph(
+            x=x_t, r=self._model_conf.max_radius, batch=batch_vec
+        )
 
-        # Psi angle prediction
-        gt_psi = input_feats['torsion_angles_sin_cos'][..., 2, :]
-        psi_pred = self._apply_mask(
-            model_out['psi'], gt_psi, 1 - fixed_mask[..., None])
+        # Extract edge features
+        row, col = edge_index
+        batch_indices = batch_vec[row]
+        edge_embed = init_edge_embed[batch_indices, row % num_atoms, col % num_atoms] # [num_edges, D_edge]
+        
+        # Run main network 
+        model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)
 
         pred_out = {
-            'psi': psi_pred,
+            'psi': None,
             'rot_score': model_out['rot_score'],
             'trans_score': model_out['trans_score'],
+            'rigids': model_out['final_rigids'].to_tensor_7(),
         }
-        rigids_pred = model_out['final_rigids']
-        pred_out['rigids'] = rigids_pred.to_tensor_7()
-        bb_representations = all_atom.compute_backbone(rigids_pred, psi_pred)
-        pred_out['atom37'] = bb_representations[0].to(rigids_pred.device)
-        pred_out['atom14'] = bb_representations[-1].to(rigids_pred.device)
+
         return pred_out

@@ -1,6 +1,7 @@
 from torch import nn
 import torch
-
+from einops import rearrange
+from openfold.utils.rigid_utils import Rigid
 
 class E_GCL(nn.Module):
     """
@@ -187,6 +188,73 @@ def get_edges_batch(n_nodes, batch_size):
         edges = [torch.cat(rows), torch.cat(cols)]
     return edges, edge_attr
 
+class EGNNScore(nn.Module):
+    def __init__(self, model_conf, diffuser, act_fn=nn.SiLU(), n_layers=4, residual=True, attention=False, normalize=False, tanh=False):
+        super(EGNNScore, self).__init__()
+        self._model_conf = model_conf
+        
+        in_node_nf = model_conf.node_embed_size
+        hidden_nf = model_conf.hidden_dim
+        out_node_nf=7
+        in_edge_nf = model_conf.edge_embed_size
+
+        self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
+        self.diffuser = diffuser
+        
+        self.scale_pos = lambda x: x * model_conf.ipa.coordinate_scaling
+        self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
+
+        self.unscale_pos = lambda x: x / model_conf.ipa.coordinate_scaling
+        self.unscale_rigids = lambda x: x.apply_trans_fn(self.unscale_pos)
+
+    def forward(self, h, x, edges, edge_attr, input_feats):
+        batch_size, num_atoms = input_feats['atom_types'].shape
+
+        # obtain node embeddings 
+        x = self.scale_pos(x)
+        h, _ = self.egnn(h, x, edges, edge_attr)
+
+        # predict denoised rigids 
+        h = rearrange(h, '(b n) d -> b n d', b=batch_size, n=num_atoms)
+        num_bb_atoms = input_feats['num_bb_atoms'][0]
+        num_bbs = len(num_bb_atoms)
+
+        curr_rigids = Rigid.from_tensor_7(input_feats['rigids_t'])
+        curr_rigids = self.scale_rigids(curr_rigids)
+
+        rigid_update = torch.zeros(batch_size, num_bbs, 7).to(h.device)
+        start_idx = 0
+        for i, num_bb_atom in enumerate(num_bb_atoms):
+            rigid_update[:, i, :] = h[:, start_idx:start_idx + num_bb_atom, :].mean(dim=1)
+            start_idx += num_bb_atom
+        
+        curr_rigids = curr_rigids.compose_q_update_vec(rigid_update)
+        curr_rigids = self.unscale_rigids(curr_rigids)
+
+        # compute scores
+        init_rigids = Rigid.from_tensor_7(input_feats['rigids_t'])
+
+        rot_score = self.diffuser.calc_rot_score(
+            init_rigids.get_rots(),
+            curr_rigids.get_rots(),
+            input_feats['t']
+        )
+
+        trans_score = self.diffuser.calc_trans_score(
+            init_rigids.get_trans(),
+            curr_rigids.get_trans(),
+            input_feats['t'][:, None, None],
+            use_torch=True
+        )
+
+        model_out = {
+            'rot_score': rot_score,
+            'trans_score': trans_score,
+            'final_rigids': curr_rigids,
+        }
+        
+        return model_out
+
 
 if __name__ == "__main__":
     # Dummy parameters
@@ -199,8 +267,6 @@ if __name__ == "__main__":
     h = torch.ones(batch_size *  n_nodes, n_feat)
     x = torch.ones(batch_size * n_nodes, x_dim)
     edges, edge_attr = get_edges_batch(n_nodes, batch_size)
-    print(f"edges.shape: {edges[0].shape}, edge_attr.shape: {edge_attr.shape}")
-    assert False
 
     # Initialize EGNN
     egnn = EGNN(in_node_nf=n_feat, hidden_nf=32, out_node_nf=1, in_edge_nf=1)
