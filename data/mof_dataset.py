@@ -84,14 +84,21 @@ class MOFDataset(data.Dataset):
         return len(self.cached_data)
 
     def __getitem__(self, idx):
+        """
+        Returns: dictionary with following keys:
+            - rigids_0: [num_components, 7]
+            - rigids_t: [num_components, 7]
+            - x_t: [num_atoms, 3]
+            - atom_types: [num_atoms]
+            - num_atoms: int
+            - num_bb_atoms: [num_components]
+            - t: float
+        """
 
         feats = {}
 
         data = self.cached_data[idx]
         name = data.m_id
-
-        rigids_0 = self.get_rigids_0(data)
-        feats['rigids_0'] = rigids_0
 
         # Use a fixed seed for evaluation.
         if self.is_training:
@@ -100,6 +107,9 @@ class MOFDataset(data.Dataset):
             rng = np.random.default_rng(idx)
 
         # Sample t and diffuse.
+        rigids_0 = self.get_rigids_0(data)
+        feats['rigids_0'] = rigids_0
+
         gt_bb_rigid = rigid_utils.Rigid.from_tensor_7(rigids_0)
         if self.is_training:
             t = rng.uniform(self._data_conf.min_t, 1.0)
@@ -119,7 +129,7 @@ class MOFDataset(data.Dataset):
         feats.update(diff_feats_t)
         feats['t'] = t
 
-        # get coordinates, atom_types
+        # get noised coordinates x_t, atom_types
         x_t = []
         atom_types = []
         _rigids_t = rigid_utils.Rigid.from_tensor_7(diff_feats_t['rigids_t'])
@@ -131,14 +141,13 @@ class MOFDataset(data.Dataset):
         
         atom_types = torch.cat(atom_types, dim=0)
         x_t = torch.cat(x_t, dim=0)
-        num_bb_atoms = [bb.num_atoms for bb in data.pyg_mols]
+        num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
+
         feats['atom_types'] = atom_types
         feats['x_t'] = x_t
+        feats['num_atoms'] = data.num_atoms
         feats['num_bb_atoms'] = num_bb_atoms
 
-        # TODO: provide indices for bbs (for aggregation)
-        # TODO: what does du.pad_feats do? 
-        
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
         feats = tree.map_structure(
             lambda x: x if torch.is_tensor(x) else torch.tensor(x), feats)
@@ -160,41 +169,13 @@ class TrainSampler(data.Sampler):
         self._log = logging.getLogger(__name__)
         self._data_conf = data_conf
         self._dataset = dataset
-        self._data_csv = self._dataset.csv
-        self._dataset_indices = list(range(len(self._data_csv)))
-        self._data_csv['index'] = self._dataset_indices
+        # self._data_csv = self._dataset.csv
+        self._dataset_indices = list(range(len(self._dataset)))
+        # self._data_csv['index'] = self._dataset_indices
         self._batch_size = batch_size
         self.epoch = 0
         self._sample_mode = sample_mode
         self.sampler_len = len(self._dataset_indices) * self._batch_size
-
-        if self._sample_mode in ['cluster_length_batch', 'cluster_time_batch']:
-            self._pdb_to_cluster = self._read_clusters()
-            self._max_cluster = max(self._pdb_to_cluster.values())
-            self._log.info(f'Read {self._max_cluster} clusters.')
-            self._missing_pdbs = 0
-            def cluster_lookup(pdb):
-                pdb = pdb.upper()
-                if pdb not in self._pdb_to_cluster:
-                    self._pdb_to_cluster[pdb] = self._max_cluster + 1
-                    self._max_cluster += 1
-                    self._missing_pdbs += 1
-                return self._pdb_to_cluster[pdb]
-            self._data_csv['cluster'] = self._data_csv['pdb_name'].map(cluster_lookup)
-            num_clusters = len(set(self._data_csv['cluster']))
-            self.sampler_len = num_clusters * self._batch_size
-            self._log.info(
-                f'Training on {num_clusters} clusters. PDBs without clusters: {self._missing_pdbs}'
-            )
-
-    def _read_clusters(self):
-        pdb_to_cluster = {}
-        with open(self._data_conf.cluster_path, "r") as f:
-            for i,line in enumerate(f):
-                for chain in line.split(' '):
-                    pdb = chain.split('_')[0]
-                    pdb_to_cluster[pdb.upper()] = i
-        return pdb_to_cluster
 
     def __iter__(self):
         if self._sample_mode == 'length_batch':
@@ -300,11 +281,11 @@ class DistributedTrainSampler(data.Sampler):
                 " [0, {}]".format(rank, num_replicas - 1))
         self._data_conf = data_conf
         self._dataset = dataset
-        self._data_csv = self._dataset.csv
-        self._dataset_indices = list(range(len(self._data_csv)))
-        self._data_csv['index'] = self._dataset_indices
+        # self._data_csv = self._dataset.csv
+        self._dataset_indices = list(range(len(self._dataset)))
+        # self._data_csv['index'] = self._dataset_indices
         # _repeated_size is the size of the dataset multiply by batch size
-        self._repeated_size = batch_size * len(self._data_csv)
+        self._repeated_size = batch_size * len(self._dataset)
         self._batch_size = batch_size
         self.num_replicas = num_replicas
         self.rank = rank
@@ -330,9 +311,9 @@ class DistributedTrainSampler(data.Sampler):
             # deterministically shuffle based on epoch and seed
             g = torch.Generator()
             g.manual_seed(self.seed + self.epoch)
-            indices = torch.randperm(len(self._data_csv), generator=g).tolist()  # type: ignore[arg-type]
+            indices = torch.randperm(len(self._dataset), generator=g).tolist()  # type: ignore[arg-type]
         else:
-            indices = list(range(len(self._data_csv)))  # type: ignore[arg-type]
+            indices = list(range(len(self._dataset)))  # type: ignore[arg-type]
 
         # indices is expanded by self._batch_size times
         indices = np.repeat(indices, self._batch_size)

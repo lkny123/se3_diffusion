@@ -185,14 +185,14 @@ class Experiment:
 
         # Datasets
         train_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'train.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'train_mini.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=True
         )
 
         valid_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'val.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'val_mini.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=False
@@ -537,9 +537,9 @@ class Experiment:
             loss: Final training loss scalar.
             aux_data: Additional logging data.
         """
-        if self._model_conf.embed.embed_self_conditioning and random.random() > 0.5:
-            with torch.no_grad():
-                batch = self._self_conditioning(batch)
+        # if self._model_conf.embed.embed_self_conditioning and random.random() > 0.5:
+        #     with torch.no_grad():
+        #         batch = self._self_conditioning(batch)
         model_out = self.model(batch)
         bb_mask = batch['res_mask']
         diffuse_mask = 1 - batch['fixed_mask']
