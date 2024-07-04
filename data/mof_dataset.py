@@ -130,23 +130,34 @@ class MOFDataset(data.Dataset):
         feats['t'] = t
 
         # get noised coordinates x_t, atom_types
-        x_t = []
+        x_t, x_0, x_bb = [], [], []
         atom_types = []
         _rigids_t = rigid_utils.Rigid.from_tensor_7(diff_feats_t['rigids_t'])
+        _rigids_0 = rigid_utils.Rigid.from_tensor_7(rigids_0)
         for i, bb in enumerate(data.pyg_mols):
-            bb_pos = _rigids_t[i].apply(bb.pos)
+            bb_pos_t = _rigids_t[i].apply(bb.pos)
+            bb_pos_0 = _rigids_0[i].apply(bb.pos)
 
-            x_t.append(bb_pos)
+            x_t.append(bb_pos_t)
+            x_0.append(bb_pos_0)
+            x_bb.append(bb.pos)
             atom_types.append(bb.atom_types)
         
         atom_types = torch.cat(atom_types, dim=0)
         x_t = torch.cat(x_t, dim=0)
+        x_0 = torch.cat(x_0, dim=0)
+        x_bb = torch.cat(x_bb, dim=0)
         num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
 
-        feats['atom_types'] = atom_types
+        feats['x_0'] = x_0
         feats['x_t'] = x_t
+        feats['x_bb'] = x_bb
+        feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms
         feats['num_bb_atoms'] = num_bb_atoms
+
+        feats['res_mask'] = torch.ones(data.num_components)
+        feats['fixed_mask'] = torch.zeros(data.num_components)
 
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
         feats = tree.map_structure(
