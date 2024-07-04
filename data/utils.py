@@ -398,6 +398,19 @@ def length_batching(
         pad_example(x) for (_, x) in length_sorted[:max_batch_examples]]
     return torch.utils.data.default_collate(padded_batch)
 
+def length_batching_mof(
+        np_dicts: List[Dict[str, np.ndarray]],
+        max_squared_res: int,
+    ):
+    get_len = lambda x: x['x_t'].shape[0]
+    dicts_by_length = [(get_len(x), x) for x in np_dicts]
+    length_sorted = sorted(dicts_by_length, key=lambda x: x[0], reverse=True)
+    max_len = length_sorted[0][0]
+    max_batch_examples = int(max_squared_res // max_len**2)
+    batch = [
+        x for (_, x) in length_sorted[:max_batch_examples]]
+    return torch.utils.data.default_collate(batch)
+
 def create_data_loader(
         torch_dataset: data.Dataset,
         batch_size,
@@ -413,7 +426,7 @@ def create_data_loader(
     if np_collate:
         collate_fn = lambda x: concat_np_features(x, add_batch_dim=True)
     elif length_batch:
-        collate_fn = lambda x: length_batching(
+        collate_fn = lambda x: length_batching_mof(
             x, max_squared_res=max_squared_res)
     else:
         collate_fn = None
