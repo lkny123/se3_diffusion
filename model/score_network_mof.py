@@ -198,11 +198,50 @@ class ScoreNetwork(nn.Module):
         # Run main network 
         model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)
 
+        # Predicted coordinates
+        pred_rigid = model_out['final_rigids']
+        # pred_rigid = Rigid.from_tensor_7(input_feats['rigids_0']) # check x_0 = rigids_0 (*) x_bb
+        x_pred = self.compute_coords(input_feats, pred_rigid)
+        
         pred_out = {
             'psi': None,
             'rot_score': model_out['rot_score'],
             'trans_score': model_out['trans_score'],
             'rigids': model_out['final_rigids'].to_tensor_7(),
+            'x_pred': x_pred,
         }
 
         return pred_out
+    
+    def compute_coords(self, input_feats, pred_rigid):
+        """
+        Predicts coordinates by applying rotation and translation to backbone coordinates.
+
+        Args:
+            x_bb (torch.Tensor): [N, 3], backbone atom coordinates
+            num_bb_atoms (torch.Tensor): [M],  containing the number of backbone atoms in each segment.
+            pred_rigid (Rigid): [B, M], predicted rototranslations for each bb and batch
+
+        Returns:
+            torch.Tensor: [B, N, 3], predicted atom coordinates
+        """
+        x_bb = input_feats['x_bb'][0]  # [N, 3]
+        num_bb_atoms = input_feats['num_bb_atoms'][0]
+
+        start_idx = 0
+        x_pred = []
+
+        for i, num_bb_atom in enumerate(num_bb_atoms):
+            bb_coord = x_bb[start_idx:start_idx + num_bb_atom, :]  # [num_bb_atom, 3]
+            rot_mats = pred_rigid[:, i]._rots.get_rot_mats()  # [batch_size, 3, 3]
+            trans = pred_rigid[:, i]._trans[:, None, :]  # [batch_size, 1, 3]
+            
+            # Apply rotation and translation
+            pred_coord = torch.einsum('bij,nj->bni', rot_mats, bb_coord) + trans  # [batch_size, num_bb_atom, 3]
+            
+            x_pred.append(pred_coord)
+            start_idx += num_bb_atom
+
+        x_pred = torch.cat(x_pred, dim=1)  
+
+        return x_pred

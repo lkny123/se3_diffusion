@@ -189,7 +189,7 @@ def get_edges_batch(n_nodes, batch_size):
     return edges, edge_attr
 
 class EGNNScore(nn.Module):
-    def __init__(self, model_conf, diffuser, act_fn=nn.SiLU(), n_layers=4, residual=True, attention=False, normalize=False, tanh=False):
+    def __init__(self, model_conf, diffuser, residual=True, attention=False, normalize=False, tanh=False):
         super(EGNNScore, self).__init__()
         self._model_conf = model_conf
         
@@ -197,6 +197,9 @@ class EGNNScore(nn.Module):
         hidden_nf = model_conf.hidden_dim
         out_node_nf=7
         in_edge_nf = model_conf.edge_embed_size
+        if model_conf.act_fn == 'silu':
+            act_fn = nn.SiLU()
+        n_layers = model_conf.n_layers
 
         self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
         self.diffuser = diffuser
