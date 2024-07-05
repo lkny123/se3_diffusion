@@ -402,7 +402,7 @@ def length_batching_mof(
         np_dicts: List[Dict[str, np.ndarray]],
         max_squared_res: int,
     ):
-    get_len = lambda x: x['x_t'].shape[0]
+    get_len = lambda x: x['num_atoms']
     dicts_by_length = [(get_len(x), x) for x in np_dicts]
     length_sorted = sorted(dicts_by_length, key=lambda x: x[0], reverse=True)
     max_len = length_sorted[0][0]

@@ -28,6 +28,7 @@ from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
 
 from mofdiff.common.data_utils import frac_to_cart_coords
+from mofdiff.common.atomic_utils import mof2cif_with_bonds
 
 
 CrystalNN = local_env.CrystalNN(
@@ -74,7 +75,7 @@ class MOFDataset(data.Dataset):
 
             # Center the coordinates
             centroid = x.mean(dim=0)
-            bb.pos = x - centroid
+            bb.pos = x - centroid # canonical bb coordinates
 
             rigids_0[i] = torch.cat([quat, centroid])
 
@@ -111,21 +112,12 @@ class MOFDataset(data.Dataset):
         feats['rigids_0'] = rigids_0
 
         gt_bb_rigid = rigid_utils.Rigid.from_tensor_7(rigids_0)
-        if self.is_training:
-            t = rng.uniform(self._data_conf.min_t, 1.0)
-            diff_feats_t = self._diffuser.forward_marginal(
-                rigids_0=gt_bb_rigid,
-                t=t,
-                diffuse_mask=None
-            )
-        else:
-            t = 1.0
-            diff_feats_t = self.diffuser.sample_ref(
-                n_samples=gt_bb_rigid.shape[0],
-                impute=gt_bb_rigid,
-                diffuse_mask=None,
-                as_tensor_7=True,
-            )
+        t = rng.uniform(self._data_conf.min_t, 1.0)
+        diff_feats_t = self._diffuser.forward_marginal(
+            rigids_0=gt_bb_rigid,
+            t=t,
+            diffuse_mask=None
+        )
         feats.update(diff_feats_t)
         feats['t'] = t
 
@@ -162,10 +154,7 @@ class MOFDataset(data.Dataset):
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
         feats = tree.map_structure(
             lambda x: x if torch.is_tensor(x) else torch.tensor(x), feats)
-        if self.is_training:
-            return feats
-        else:
-            return feats, name
+        return feats
 
 class TrainSampler(data.Sampler):
 
