@@ -26,6 +26,7 @@ import logging
 import copy
 import random
 import pandas as pd
+from tqdm import tqdm
 
 from pathlib import Path
 from collections import defaultdict
@@ -138,7 +139,7 @@ class Experiment:
         num_parameters = sum(p.numel() for p in self._model.parameters())
         self._exp_conf.num_parameters = num_parameters
         self._log.info(f'Number of model parameters {num_parameters}')
-        self._optimizer = torch.optim.Adam(
+        self._optimizer = torch.optim.AdamW(
             self._model.parameters(), lr=self._exp_conf.learning_rate)
         if ckpt_opt is not None:
             self._optimizer.load_state_dict(ckpt_opt)
@@ -185,14 +186,14 @@ class Experiment:
 
         # Datasets
         train_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'train_mini.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'train_dev.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=True
         )
 
         valid_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'val_mini.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'val_dev.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=False
@@ -229,7 +230,7 @@ class Experiment:
             valid_dataset,
             sampler=valid_sampler,
             np_collate=False,
-            length_batch=False,
+            length_batch=True,
             batch_size=self._exp_conf.eval_batch_size,
             shuffle=False,
             num_workers=0,
@@ -241,7 +242,7 @@ class Experiment:
         self._log.info('Initializing Wandb.')
         conf_dict = OmegaConf.to_container(self._conf, resolve=True)
         wandb.init(
-            project='se3-diffusion',
+            project=self._exp_conf.project,
             name=self._exp_conf.name,
             config=dict(eu.flatten_dict(conf_dict)),
             dir=self._exp_conf.wandb_dir,
@@ -336,7 +337,7 @@ class Experiment:
         global_logs = []
         log_time = time.time()
         step_time = time.time()
-        for train_feats in train_loader:
+        for train_feats in tqdm(train_loader, desc=f"Epoch {self.trained_epochs}"):
             train_feats = tree.map_structure(
                 lambda x: x.to(device), train_feats)
             loss, aux_data = self.update_fn(train_feats)
@@ -384,10 +385,7 @@ class Experiment:
                 eval_dir = os.path.join(
                     self._exp_conf.eval_dir, f'step_{self.trained_steps}')
                 os.makedirs(eval_dir, exist_ok=True)
-                ckpt_metrics = self.eval_fn(
-                    eval_dir, valid_loader, device,
-                    noise_scale=self._exp_conf.noise_scale
-                )
+                ckpt_metrics = self.eval_fn(valid_loader, device)
                 eval_time = time.time() - start_time
                 self._log.info(f'Finished evaluation in {eval_time:.2f}s')
             else:
@@ -406,7 +404,7 @@ class Experiment:
                     'bb_atom_loss': aux_data['bb_atom_loss'],
                     'dist_mat_loss': aux_data['batch_dist_mat_loss'],
                     'batch_size': aux_data['examples_per_step'],
-                    'res_length': aux_data['res_length'],
+                    'num_bbs': aux_data['num_bbs'],
                     'examples_per_sec': example_per_sec,
                     'num_epochs': self.trained_epochs,
                 }
@@ -438,15 +436,16 @@ class Experiment:
 
                 if ckpt_metrics is not None:
                     wandb_logs['eval_time'] = eval_time
-                    for metric_name in metrics.ALL_METRICS:
-                        wandb_logs[metric_name] = ckpt_metrics[metric_name].mean()
-                    eval_table = wandb.Table(
-                        columns=ckpt_metrics.columns.to_list()+['structure'])
-                    for _, row in ckpt_metrics.iterrows():
-                        pdb_path = row['sample_path']
-                        row_metrics = row.to_list() + [wandb.Molecule(pdb_path)]
-                        eval_table.add_data(*row_metrics)
-                    wandb_logs['sample_metrics'] = eval_table
+                    # for metric_name in metrics.ALL_METRICS:
+                    #     wandb_logs[metric_name] = ckpt_metrics[metric_name].mean()
+                    # eval_table = wandb.Table(
+                    #     columns=ckpt_metrics.columns.to_list()+['structure'])
+                    # for _, row in ckpt_metrics.iterrows():
+                    #     pdb_path = row['sample_path']
+                    #     row_metrics = row.to_list() + [wandb.Molecule(pdb_path)]
+                    #     eval_table.add_data(*row_metrics)
+                    # wandb_logs['sample_metrics'] = eval_table
+                    wandb_logs.update(ckpt_metrics)
 
                 wandb.log(wandb_logs, step=self.trained_steps)
 
@@ -461,65 +460,88 @@ class Experiment:
         if return_logs:
             return global_logs
 
-    def eval_fn(self, eval_dir, valid_loader, device, min_t=None, num_t=None, noise_scale=1.0):
-        ckpt_eval_metrics = []
-        for valid_feats, pdb_names in valid_loader:
-            res_mask = du.move_to_np(valid_feats['res_mask'].bool())
-            fixed_mask = du.move_to_np(valid_feats['fixed_mask'].bool())
-            aatype = du.move_to_np(valid_feats['aatype'])
-            gt_prot = du.move_to_np(valid_feats['atom37_pos'])
-            batch_size = res_mask.shape[0]
-            valid_feats = tree.map_structure(
-                lambda x: x.to(device), valid_feats)
-
-            # Run inference
-            infer_out = self.inference_fn(
-                valid_feats, min_t=min_t, num_t=num_t, noise_scale=noise_scale)
-            final_prot = infer_out['prot_traj'][0]
-            for i in range(batch_size):
-                num_res = int(np.sum(res_mask[i]).item())
-                unpad_fixed_mask = fixed_mask[i][res_mask[i]]
-                unpad_diffused_mask = 1 - unpad_fixed_mask
-                unpad_prot = final_prot[i][res_mask[i]]
-                unpad_gt_prot = gt_prot[i][res_mask[i]]
-                unpad_gt_aatype = aatype[i][res_mask[i]]
-                percent_diffused = np.sum(unpad_diffused_mask) / num_res
-
-                # Extract argmax predicted aatype
-                saved_path = au.write_prot_to_pdb(
-                    unpad_prot,
-                    os.path.join(
-                        eval_dir,
-                        f'len_{num_res}_sample_{i}_diffused_{percent_diffused:.2f}.pdb'
-                    ),
-                    no_indexing=True,
-                    b_factors=np.tile(1 - unpad_fixed_mask[..., None], 37) * 100
+    def eval_fn(self, valid_loader, device):
+        log_losses = defaultdict(list)
+        for valid_feats in tqdm(valid_loader, desc=f"Epoch {self.trained_epochs} Eval"):
+            try:
+                valid_feats = tree.map_structure(
+                    lambda x: x.to(device), valid_feats
                 )
-                try:
-                    sample_metrics = metrics.protein_metrics(
-                        pdb_path=saved_path,
-                        atom37_pos=unpad_prot,
-                        gt_atom37_pos=unpad_gt_prot,
-                        gt_aatype=unpad_gt_aatype,
-                        diffuse_mask=unpad_diffused_mask,
-                    )
-                except ValueError as e:
-                    self._log.warning(
-                        f'Failed evaluation of length {num_res} sample {i}: {e}')
-                    continue
-                sample_metrics['step'] = self.trained_steps
-                sample_metrics['num_res'] = num_res
-                sample_metrics['fixed_residues'] = np.sum(unpad_fixed_mask)
-                sample_metrics['diffused_percentage'] = percent_diffused
-                sample_metrics['sample_path'] = saved_path
-                sample_metrics['gt_pdb'] = pdb_names[i]
-                ckpt_eval_metrics.append(sample_metrics)
+                _, val_aux_data = self.loss_fn(valid_feats)
+                for k,v in val_aux_data.items():
+                    log_losses[k].append(du.move_to_np(v))
+            except RuntimeError as e:
+                self._log.warning(f'Failed evaluation: {e}')
+        
+        log_losses = tree.map_structure(np.mean, log_losses)
 
-        # Save metrics as CSV.
-        eval_metrics_csv_path = os.path.join(eval_dir, 'metrics.csv')
-        ckpt_eval_metrics = pd.DataFrame(ckpt_eval_metrics)
-        ckpt_eval_metrics.to_csv(eval_metrics_csv_path, index=False)
-        return ckpt_eval_metrics
+        ckpt_metrics = {
+            'val_loss': np.mean(log_losses['total_loss']),
+            'val_rot_loss': np.mean(log_losses['rot_loss']),
+            'val_trans_loss': np.mean(log_losses['trans_loss'])
+        }
+
+        return ckpt_metrics
+            
+    # def eval_fn(self, eval_dir, valid_loader, device, min_t=None, num_t=None, noise_scale=1.0):
+    #     ckpt_eval_metrics = []
+    #     for valid_feats, pdb_names in valid_loader:
+    #         res_mask = du.move_to_np(valid_feats['res_mask'].bool())
+    #         fixed_mask = du.move_to_np(valid_feats['fixed_mask'].bool())
+    #         aatype = du.move_to_np(valid_feats['aatype'])
+    #         gt_prot = du.move_to_np(valid_feats['atom37_pos'])
+    #         batch_size = res_mask.shape[0]
+    #         valid_feats = tree.map_structure(
+    #             lambda x: x.to(device), valid_feats)
+
+    #         # Run inference
+    #         infer_out = self.inference_fn(
+    #             valid_feats, min_t=min_t, num_t=num_t, noise_scale=noise_scale)
+    #         final_prot = infer_out['prot_traj'][0]
+    #         for i in range(batch_size):
+    #             num_res = int(np.sum(res_mask[i]).item())
+    #             unpad_fixed_mask = fixed_mask[i][res_mask[i]]
+    #             unpad_diffused_mask = 1 - unpad_fixed_mask
+    #             unpad_prot = final_prot[i][res_mask[i]]
+    #             unpad_gt_prot = gt_prot[i][res_mask[i]]
+    #             unpad_gt_aatype = aatype[i][res_mask[i]]
+    #             percent_diffused = np.sum(unpad_diffused_mask) / num_res
+
+    #             # Extract argmax predicted aatype
+    #             saved_path = au.write_prot_to_pdb(
+    #                 unpad_prot,
+    #                 os.path.join(
+    #                     eval_dir,
+    #                     f'len_{num_res}_sample_{i}_diffused_{percent_diffused:.2f}.pdb'
+    #                 ),
+    #                 no_indexing=True,
+    #                 b_factors=np.tile(1 - unpad_fixed_mask[..., None], 37) * 100
+    #             )
+    #             try:
+    #                 sample_metrics = metrics.protein_metrics(
+    #                     pdb_path=saved_path,
+    #                     atom37_pos=unpad_prot,
+    #                     gt_atom37_pos=unpad_gt_prot,
+    #                     gt_aatype=unpad_gt_aatype,
+    #                     diffuse_mask=unpad_diffused_mask,
+    #                 )
+    #             except ValueError as e:
+    #                 self._log.warning(
+    #                     f'Failed evaluation of length {num_res} sample {i}: {e}')
+    #                 continue
+    #             sample_metrics['step'] = self.trained_steps
+    #             sample_metrics['num_res'] = num_res
+    #             sample_metrics['fixed_residues'] = np.sum(unpad_fixed_mask)
+    #             sample_metrics['diffused_percentage'] = percent_diffused
+    #             sample_metrics['sample_path'] = saved_path
+    #             sample_metrics['gt_pdb'] = pdb_names[i]
+    #             ckpt_eval_metrics.append(sample_metrics)
+
+    #     # Save metrics as CSV.
+    #     eval_metrics_csv_path = os.path.join(eval_dir, 'metrics.csv')
+    #     ckpt_eval_metrics = pd.DataFrame(ckpt_eval_metrics)
+    #     ckpt_eval_metrics.to_csv(eval_metrics_csv_path, index=False)
+    #     return ckpt_eval_metrics
 
     def _self_conditioning(self, batch):
         model_sc = self.model(batch)
@@ -686,7 +708,7 @@ class Experiment:
             'bb_atom_loss': normalize_loss(bb_atom_loss),
             'dist_mat_loss': normalize_loss(dist_mat_loss),
             'examples_per_step': torch.tensor(batch_size),
-            'res_length': torch.mean(torch.sum(bb_mask, dim=-1)),
+            'num_bbs': torch.mean(torch.sum(bb_mask, dim=-1)),
         }
 
         # Maintain a history of the past N number of steps.
