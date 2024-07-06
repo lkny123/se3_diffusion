@@ -729,11 +729,44 @@ class Experiment:
         cond_var = 1 - torch.exp(-beta_t)
         return (trans_score * cond_var + trans_t) / torch.exp(-1/2*beta_t)
 
+    def compute_coords(self, input_feats, rigid=None):
+
+        x_bb = input_feats['x_bb'][0]  # [N, 3]
+        num_bb_atoms = input_feats['num_bb_atoms'][0]
+
+        start_idx = 0
+        x_pred = []
+
+        # Deal with different types of rigid
+        if rigid is not None:
+            pred_rigid = ru.Rigid.from_tensor_7(rigid) if isinstance(rigid, torch.Tensor) else rigid # [1, M, 7]
+            pred_rigid._rots = pred_rigid._rots.to(x_bb.device, dtype=x_bb.dtype)
+            pred_rigid._trans = pred_rigid._trans.to(x_bb.device)
+        else:
+            pred_rigid = ru.Rigid.from_tensor_7(input_feats['rigids_t']) # [1, M, 7]
+
+        # Rototranslate each building block 
+        for i, num_bb_atom in enumerate(num_bb_atoms):
+            bb_coord = x_bb[start_idx:start_idx + num_bb_atom, :]  # [num_bb_atom, 3]
+            rot_mats = pred_rigid[:, i]._rots.get_rot_mats()  # [1, 3, 3]
+            trans = pred_rigid[:, i]._trans[:, None, :]  # [1, 1, 3]
+            
+            # Apply rotation and translation
+            pred_coord = torch.einsum('bij,nj->bni', rot_mats, bb_coord) + trans  # [1, num_bb_atom, 3]
+            
+            x_pred.append(pred_coord)
+            start_idx += num_bb_atom
+
+        x_pred = torch.cat(x_pred, dim=1)  # [1, N, 3]
+
+        return x_pred # [1, N, 3]
+    
     def _set_t_feats(self, feats, t, t_placeholder):
         feats['t'] = t * t_placeholder
         rot_score_scaling, trans_score_scaling = self.diffuser.score_scaling(t)
         feats['rot_score_scaling'] = rot_score_scaling * t_placeholder
         feats['trans_score_scaling'] = trans_score_scaling * t_placeholder
+        feats['x_t'] = self.compute_coords(feats)
         return feats
 
     def forward_traj(self, x_0, min_t, num_t):
@@ -753,7 +786,6 @@ class Experiment:
             min_t=None,
             center=True,
             aux_traj=False,
-            self_condition=True,
             noise_scale=1.0,
         ):
         """Inference function.
@@ -781,10 +813,6 @@ class Experiment:
         all_trans_0_pred = []
         all_bb_0_pred = []
         with torch.no_grad():
-            if self._model_conf.embed.embed_self_conditioning and self_condition:
-                sample_feats = self._set_t_feats(
-                    sample_feats, reverse_steps[0], t_placeholder)
-                sample_feats = self._self_conditioning(sample_feats)
             for t in reverse_steps:
                 if t > min_t:
                     sample_feats = self._set_t_feats(sample_feats, t, t_placeholder)
@@ -792,8 +820,6 @@ class Experiment:
                     rot_score = model_out['rot_score']
                     trans_score = model_out['trans_score']
                     rigid_pred = model_out['rigids']
-                    if self._model_conf.embed.embed_self_conditioning:
-                        sample_feats['sc_ca_t'] = rigid_pred[..., 4:]
                     fixed_mask = sample_feats['fixed_mask'] * sample_feats['res_mask']
                     diffuse_mask = (1 - sample_feats['fixed_mask']) * sample_feats['res_mask']
                     rigids_t = self.diffuser.reverse(
@@ -817,17 +843,12 @@ class Experiment:
                 gt_trans_0 = sample_feats['rigids_t'][..., 4:]
                 pred_trans_0 = rigid_pred[..., 4:]
                 trans_pred_0 = diffuse_mask[..., None] * pred_trans_0 + fixed_mask[..., None] * gt_trans_0
-                psi_pred = model_out['psi']
                 if aux_traj:
-                    atom37_0 = all_atom.compute_backbone(
-                        ru.Rigid.from_tensor_7(rigid_pred),
-                        psi_pred
-                    )[0]
-                    all_bb_0_pred.append(du.move_to_np(atom37_0))
+                    mof_0 = self.compute_coords(sample_feats, rigid_pred)
+                    all_bb_0_pred.append(du.move_to_np(mof_0))
                     all_trans_0_pred.append(du.move_to_np(trans_pred_0))
-                atom37_t = all_atom.compute_backbone(
-                    rigids_t, psi_pred)[0]
-                all_bb_prots.append(du.move_to_np(atom37_t))
+                mof_t = self.compute_coords(sample_feats, rigids_t)
+                all_bb_prots.append(du.move_to_np(mof_t))
 
         # Flip trajectory so that it starts from t=0.
         # This helps visualization.
@@ -837,14 +858,12 @@ class Experiment:
             all_rigids = flip(all_rigids)
             all_trans_0_pred = flip(all_trans_0_pred)
             all_bb_0_pred = flip(all_bb_0_pred)
-
         ret = {
-            'prot_traj': all_bb_prots,
+            'mof_traj': all_bb_prots,
         }
         if aux_traj:
             ret['rigid_traj'] = all_rigids
             ret['trans_traj'] = all_trans_0_pred
-            ret['psi_pred'] = psi_pred[None]
             ret['rigid_0_traj'] = all_bb_0_pred
         return ret
 
