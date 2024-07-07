@@ -3,7 +3,7 @@
 ```bash
 mamba env create -f env.yml
 pip install -e .
-pip install git+https://lkny123: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@github.com/lkny123/MOFDiff.git --upgrade
+pip install git+https://lkny123:github.com/lkny123/MOFDiff.git --upgrade
 ```
 
 ### Multi-GPU training
