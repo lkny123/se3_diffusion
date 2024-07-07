@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime
 from tqdm import tqdm
 from biotite.sequence.io import fasta
+from hydra.core.hydra_config import HydraConfig
 import GPUtil
 from typing import Optional
 
@@ -25,43 +26,22 @@ from analysis import utils as au
 from analysis import metrics
 from data import utils as du
 from data import residue_constants
+from data import mof_dataset
 from typing import Dict
-from experiments import train_se3_diffusion
+from experiments import train_se3_diffusion_mof
 from common.utils import PROJECT_ROOT
+from openfold.utils.rigid_utils import Rigid
 
 from omegaconf import DictConfig, OmegaConf
-from openfold.data import data_transforms
 import esm
 
+from pymatgen.core.structure import Structure
+from pymatgen.core.lattice import Lattice
+from pymatgen.io.cif import CifWriter
 
-CA_IDX = residue_constants.atom_order['CA']
-
-
-def process_chain(design_pdb_feats):
-    chain_feats = {
-        'aatype': torch.tensor(design_pdb_feats['aatype']).long(),
-        'all_atom_positions': torch.tensor(design_pdb_feats['atom_positions']).double(),
-        'all_atom_mask': torch.tensor(design_pdb_feats['atom_mask']).double()
-    }
-    chain_feats = data_transforms.atom37_to_frames(chain_feats)
-    chain_feats = data_transforms.make_atom14_masks(chain_feats)
-    chain_feats = data_transforms.make_atom14_positions(chain_feats)
-    chain_feats = data_transforms.atom37_to_torsion_angles()(chain_feats)
-    seq_idx = design_pdb_feats['residue_index'] - np.min(design_pdb_feats['residue_index']) + 1
-    chain_feats['seq_idx'] = seq_idx
-    chain_feats['res_mask'] = design_pdb_feats['bb_mask']
-    chain_feats['residue_index'] = design_pdb_feats['residue_index']
-    return chain_feats
-
-
-def create_pad_feats(pad_amt):
-    return {        
-        'res_mask': torch.ones(pad_amt),
-        'fixed_mask': torch.zeros(pad_amt),
-        'rigids_impute': torch.zeros((pad_amt, 4, 4)),
-        'torsion_impute': torch.zeros((pad_amt, 7, 2)),
-    }
-
+def get_rigids_impute(num_bbs):
+    # return Rigid.from_tensor_4x4(torch.zeros((num_bbs, 4, 4)))
+    return Rigid.identity((num_bbs,), device=num_bbs.device, requires_grad=False)
 
 class Sampler:
 
@@ -90,9 +70,6 @@ class Sampler:
 
         self._rng = np.random.default_rng(self._infer_conf.seed)
 
-        # Set model hub directory for ESMFold.
-        torch.hub.set_dir(self._infer_conf.pt_hub_dir)
-
         # Set-up accelerator
         if torch.cuda.is_available():
             if self._infer_conf.gpu_id is None:
@@ -107,8 +84,15 @@ class Sampler:
         self._log.info(f'Using device: {self.device}')
 
         # Set-up directories
-        self._weights_path = self._infer_conf.weights_path
-        output_dir =self._infer_conf.output_dir
+        hydra_dir = HydraConfig.get().run.dir
+        self._weights_path = os.path.join(
+            hydra_dir,
+            self._infer_conf.weights_path
+        )
+        output_dir = os.path.join(
+            hydra_dir,
+            self._infer_conf.output_dir
+        )
         if self._infer_conf.name is None:
             dt_string = datetime.now().strftime("%dD_%mM_%YY_%Hh_%Mm_%Ss")
         else:
@@ -116,7 +100,6 @@ class Sampler:
         self._output_dir = os.path.join(output_dir, dt_string)
         os.makedirs(self._output_dir, exist_ok=True)
         self._log.info(f'Saving results to {self._output_dir}')
-        self._pmpnn_dir = self._infer_conf.pmpnn_dir
 
         config_path = os.path.join(self._output_dir, 'inference_conf.yaml')
         with open(config_path, 'w') as f:
@@ -125,8 +108,6 @@ class Sampler:
 
         # Load models and experiment
         self._load_ckpt(conf_overrides)
-        self._folding_model = esm.pretrained.esmfold_v1().eval()
-        self._folding_model = self._folding_model.to(self.device)
 
     def _load_ckpt(self, conf_overrides):
         """Loads in model checkpoint."""
@@ -146,7 +127,7 @@ class Sampler:
         # Prepare model
         self._conf.experiment.ckpt_dir = None
         self._conf.experiment.warm_start = None
-        self.exp = train_se3_diffusion.Experiment(
+        self.exp = train_se3_diffusion_mof.Experiment(
             conf=self._conf)
         self.model = self.exp.model
 
@@ -193,6 +174,19 @@ class Sampler:
             lambda x: x[None].to(self.device), init_feats)
         return init_feats
 
+    def create_dataset(self):
+
+        # Datasets
+        test_dataset = mof_dataset.MOFDataset(
+            cache_path=os.path.join(self._conf.data.cache_dir, 'val_dev.pt'),
+            data_conf=self._conf.data,
+            diffuser=self.diffuser,
+            is_training=False,
+            is_testing=True
+        )
+
+        return test_dataset
+    
     def run_sampling(self):
         """Sets up inference run.
 
@@ -200,45 +194,35 @@ class Sampler:
             {output_dir}/{date_time}
         where {output_dir} is created at initialization.
         """
-        all_sample_lengths = range(
-            self._sample_conf.min_length,
-            self._sample_conf.max_length+1,
-            self._sample_conf.length_step
-        )
-        for sample_length in all_sample_lengths:
-            length_dir = os.path.join(
-                self._output_dir, f'length_{sample_length}')
-            os.makedirs(length_dir, exist_ok=True)
-            self._log.info(f'Sampling length {sample_length}: {length_dir}')
-            for sample_i in range(self._sample_conf.samples_per_length):
-                sample_dir = os.path.join(length_dir, f'sample_{sample_i}')
+        # Create dataset 
+        test_dataset = self.create_dataset()
+
+        for data in test_dataset:
+            data_dir = os.path.join(
+                self._output_dir, f"{data['name']}")
+            os.makedirs(data_dir, exist_ok=True)
+            for sample_i in range(self._sample_conf.samples_per_data):
+                sample_dir = os.path.join(data_dir, f'sample_{sample_i}')
                 if os.path.isdir(sample_dir):
                     continue
                 os.makedirs(sample_dir, exist_ok=True)
-                sample_output = self.sample(sample_length)
+                sample_output = self.sample(data)
                 traj_paths = self.save_traj(
-                    sample_output['prot_traj'],
+                    data,
+                    sample_output['mof_traj'],
                     sample_output['rigid_0_traj'],
-                    np.ones(sample_length),
+                    np.ones(data['num_bbs']),
                     output_dir=sample_dir
                 )
 
-                # Run ProteinMPNN
-                pdb_path = traj_paths['sample_path']
-                sc_output_dir = os.path.join(sample_dir, 'self_consistency')
-                os.makedirs(sc_output_dir, exist_ok=True)
-                shutil.copy(pdb_path, os.path.join(
-                    sc_output_dir, os.path.basename(pdb_path)))
-                _ = self.run_self_consistency(
-                    sc_output_dir,
-                    pdb_path,
-                    motif_mask=None
-                )
-                self._log.info(f'Done sample {sample_i}: {pdb_path}')
+                # Logging
+                mof_path = traj_paths['sample_path']
+                self._log.info(f'Done sample {sample_i}: {mof_path}')
 
     def save_traj(
             self,
-            bb_prot_traj: np.ndarray,
+            data,
+            mof_traj: np.ndarray,
             x0_traj: np.ndarray,
             diffuse_mask: np.ndarray,
             output_dir: str
@@ -266,183 +250,69 @@ class Sampler:
         """
 
         # Write sample.
-        diffuse_mask = diffuse_mask.astype(bool)
         sample_path = os.path.join(output_dir, 'sample')
-        prot_traj_path = os.path.join(output_dir, 'bb_traj')
+        mof_traj_path = os.path.join(output_dir, 'mof_traj')
         x0_traj_path = os.path.join(output_dir, 'x0_traj')
 
-        # Use b-factors to specify which residues are diffused.
-        b_factors = np.tile((diffuse_mask * 100)[:, None], (1, 37))
+        sample_coords = mof_traj[0]
+        atom_types = data['atom_types'].numpy()
+        lattice = data['lattice'].numpy().flatten()
 
-        sample_path = au.write_prot_to_pdb(
-            bb_prot_traj[0],
-            sample_path,
-            b_factors=b_factors
+        structure = Structure(
+            lattice=Lattice.from_parameters(*lattice), 
+            species=atom_types, 
+            coords=sample_coords,
+            coords_are_cartesian=True,
         )
-        prot_traj_path = au.write_prot_to_pdb(
-            bb_prot_traj,
-            prot_traj_path,
-            b_factors=b_factors
-        )
-        x0_traj_path = au.write_prot_to_pdb(
-            x0_traj,
-            x0_traj_path,
-            b_factors=b_factors
-        )
+
+        cif_path = os.path.join(output_dir, 'sample.cif')
+        cif_writer = CifWriter(structure)
+        cif_writer.write_file(cif_path)
+
+        assert False
+        
+        prot_traj_path = None
+        x0_traj_path = None
         return {
             'sample_path': sample_path,
-            'traj_path': prot_traj_path,
+            'traj_path': mof_traj_path,
             'x0_traj_path': x0_traj_path,
         }
 
-    def run_self_consistency(
-            self,
-            decoy_pdb_dir: str,
-            reference_pdb_path: str,
-            motif_mask: Optional[np.ndarray]=None):
-        """Run self-consistency on design proteins against reference protein.
-        
-        Args:
-            decoy_pdb_dir: directory where designed protein files are stored.
-            reference_pdb_path: path to reference protein file
-            motif_mask: Optional mask of which residues are the motif.
-
-        Returns:
-            Writes ProteinMPNN outputs to decoy_pdb_dir/seqs
-            Writes ESMFold outputs to decoy_pdb_dir/esmf
-            Writes results in decoy_pdb_dir/sc_results.csv
-        """
-
-        # Run PorteinMPNN
-        output_path = os.path.join(decoy_pdb_dir, "parsed_pdbs.jsonl")
-        process = subprocess.Popen([
-            'python',
-            f'{self._pmpnn_dir}/helper_scripts/parse_multiple_chains.py',
-            f'--input_path={decoy_pdb_dir}',
-            f'--output_path={output_path}',
-        ])
-        _ = process.wait()
-        num_tries = 0
-        ret = -1
-        pmpnn_args = [
-            'python',
-            f'{self._pmpnn_dir}/protein_mpnn_run.py',
-            '--out_folder',
-            decoy_pdb_dir,
-            '--jsonl_path',
-            output_path,
-            '--num_seq_per_target',
-            str(self._sample_conf.seq_per_sample),
-            '--sampling_temp',
-            '0.1',
-            '--seed',
-            '38',
-            '--batch_size',
-            '1',
-        ]
-        if self._infer_conf.gpu_id is not None:
-            pmpnn_args.append('--device')
-            pmpnn_args.append(str(self._infer_conf.gpu_id))
-        while ret < 0:
-            try:
-                process = subprocess.Popen(
-                    pmpnn_args,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT
-                )
-                ret = process.wait()
-            except Exception as e:
-                num_tries += 1
-                self._log.info(f'Failed ProteinMPNN. Attempt {num_tries}/5')
-                torch.cuda.empty_cache()
-                if num_tries > 4:
-                    raise e
-        mpnn_fasta_path = os.path.join(
-            decoy_pdb_dir,
-            'seqs',
-            os.path.basename(reference_pdb_path).replace('.pdb', '.fa')
-        )
-
-        # Run ESMFold on each ProteinMPNN sequence and calculate metrics.
-        mpnn_results = {
-            'tm_score': [],
-            'sample_path': [],
-            'header': [],
-            'sequence': [],
-            'rmsd': [],
-        }
-        if motif_mask is not None:
-            # Only calculate motif RMSD if mask is specified.
-            mpnn_results['motif_rmsd'] = []
-        esmf_dir = os.path.join(decoy_pdb_dir, 'esmf')
-        os.makedirs(esmf_dir, exist_ok=True)
-        fasta_seqs = fasta.FastaFile.read(mpnn_fasta_path)
-        sample_feats = du.parse_pdb_feats('sample', reference_pdb_path)
-        for i, (header, string) in enumerate(fasta_seqs.items()):
-
-            # Run ESMFold
-            esmf_sample_path = os.path.join(esmf_dir, f'sample_{i}.pdb')
-            _ = self.run_folding(string, esmf_sample_path)
-            esmf_feats = du.parse_pdb_feats('folded_sample', esmf_sample_path)
-            sample_seq = du.aatype_to_seq(sample_feats['aatype'])
-
-            # Calculate scTM of ESMFold outputs with reference protein
-            _, tm_score = metrics.calc_tm_score(
-                sample_feats['bb_positions'], esmf_feats['bb_positions'],
-                sample_seq, sample_seq)
-            rmsd = metrics.calc_aligned_rmsd(
-                sample_feats['bb_positions'], esmf_feats['bb_positions'])
-            if motif_mask is not None:
-                sample_motif = sample_feats['bb_positions'][motif_mask]
-                of_motif = esmf_feats['bb_positions'][motif_mask]
-                motif_rmsd = metrics.calc_aligned_rmsd(
-                    sample_motif, of_motif)
-                mpnn_results['motif_rmsd'].append(motif_rmsd)
-            mpnn_results['rmsd'].append(rmsd)
-            mpnn_results['tm_score'].append(tm_score)
-            mpnn_results['sample_path'].append(esmf_sample_path)
-            mpnn_results['header'].append(header)
-            mpnn_results['sequence'].append(string)
-
-        # Save results to CSV
-        csv_path = os.path.join(decoy_pdb_dir, 'sc_results.csv')
-        mpnn_results = pd.DataFrame(mpnn_results)
-        mpnn_results.to_csv(csv_path)
-
-    def run_folding(self, sequence, save_path):
-        """Run ESMFold on sequence."""
-        with torch.no_grad():
-            output = self._folding_model.infer_pdb(sequence)
-
-        with open(save_path, "w") as f:
-            f.write(output)
-        return output
-
-    def sample(self, sample_length: int):
+    def sample(self, data):
         """Sample based on length.
 
         Args:
-            sample_length: length to sample
+            data: mof sample from dataset.
 
         Returns:
-            Sample outputs. See train_se3_diffusion.inference_fn.
+            Sample outputs. See train_se3_diffusion_mof.inference_fn.
         """
         # Process motif features.
-        res_mask = np.ones(sample_length)
-        fixed_mask = np.zeros_like(res_mask)
+        res_mask = np.ones(data['num_bbs'])
+        fixed_mask = np.zeros_like(data['num_bbs'])
 
         # Initialize data
-        ref_sample = self.diffuser.sample_ref(
-            n_samples=sample_length,
-            as_tensor_7=True,
-        )
-        res_idx = torch.arange(1, sample_length+1)
+        if not self.diffuser._diffuse_rot:
+            # no rotation diffusion
+            rigids_impute = get_rigids_impute(data['num_bbs'])
+            ref_sample = self.diffuser.sample_ref(
+                n_samples=data['num_bbs'],
+                impute=rigids_impute,
+                as_tensor_7=True,
+            )
+        else:
+            # both rotation and translation diffusion
+            ref_sample = self.diffuser.sample_ref(
+                n_samples=data['num_bbs'],
+                as_tensor_7=True,
+            )
         init_feats = {
             'res_mask': res_mask,
-            'seq_idx': res_idx,
+            'x_bb': data['x_bb'],
+            'atom_types': data['atom_types'],
+            'num_bb_atoms': data['num_bb_atoms'],
             'fixed_mask': fixed_mask,
-            'torsion_angles_sin_cos': np.zeros((sample_length, 7, 2)),
-            'sc_ca_t': np.zeros((sample_length, 3)),
             **ref_sample,
         }
         # Add batch dimension and move to GPU.
@@ -461,7 +331,7 @@ class Sampler:
         )
         return tree.map_structure(lambda x: x[:, 0], sample_out)
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "config"), config_name="inference")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "config"), config_name="inference_mof")
 def run(conf: DictConfig) -> None:
 
     # Read model checkpoint.

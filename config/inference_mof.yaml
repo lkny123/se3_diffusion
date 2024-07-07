@@ -1,0 +1,26 @@
+# Configuration for inference on SE(3) diffusion experiments.
+defaults:
+  - mof_translation
+
+inference:
+  name: null
+  gpu_id: null  # CUDA GPU to use
+  seed: 123
+
+  # Directory of outputs.
+  output_dir: inference_outputs/
+
+  # Path to model weights.
+  weights_path: ckpt/step_10000.pth
+
+  diffusion:
+    # Number of steps.
+    num_t: 500
+    # Analogous to sampling temperature.
+    noise_scale: 0.1
+    # Final t.
+    min_t: 0.01
+
+  samples:
+    # Number of samples per MOF data
+    samples_per_data: 1
