@@ -176,24 +176,24 @@ class ScoreNetwork(nn.Module):
         batch_size, num_atoms = input_feats['atom_types'].shape
 
         # Initial node and edge embeddings
-        init_node_embed, init_edge_embed = self.embedding_layer(
+        node_embed, edge_embed = self.embedding_layer(
             atom_types=input_feats['atom_types'],
             t=input_feats['t'],
             x_t=input_feats['x_t'],
         )
-        node_embed = rearrange(init_node_embed, 'b n d -> (b n) d', b=batch_size, n=num_atoms)
+        node_embed = rearrange(node_embed, 'b n d -> (b n) d', b=batch_size, n=num_atoms)
 
         # Compute edge indices 
         x_t = rearrange(input_feats['x_t'], 'b n d -> (b n) d', b=batch_size, n=num_atoms)
         batch_vec = torch.arange(batch_size, device=x_t.device).repeat_interleave(num_atoms)
         edge_index = radius_graph(
-            x=x_t, r=self._model_conf.max_radius, batch=batch_vec
+            x=x_t, r=self._model_conf.max_radius, batch=batch_vec, max_num_neighbors=self._model_conf.max_neighbors
         )
 
         # Extract edge features
         row, col = edge_index
         batch_indices = batch_vec[row]
-        edge_embed = init_edge_embed[batch_indices, row % num_atoms, col % num_atoms] # [num_edges, D_edge]
+        edge_embed = edge_embed[batch_indices, row % num_atoms, col % num_atoms] # [num_edges, D_edge]
         
         # Run main network 
         model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)

@@ -139,7 +139,7 @@ class Experiment:
         num_parameters = sum(p.numel() for p in self._model.parameters())
         self._exp_conf.num_parameters = num_parameters
         self._log.info(f'Number of model parameters {num_parameters}')
-        self._optimizer = torch.optim.AdamW(
+        self._optimizer = torch.optim.Adam(
             self._model.parameters(), lr=self._exp_conf.learning_rate)
         if ckpt_opt is not None:
             self._optimizer.load_state_dict(ckpt_opt)

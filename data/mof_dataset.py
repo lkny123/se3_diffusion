@@ -27,8 +27,8 @@ from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
 
+from mofdiff.common.atomic_utils import frac2cart
 from mofdiff.common.data_utils import frac_to_cart_coords
-from mofdiff.common.atomic_utils import mof2cif_with_bonds
 
 
 CrystalNN = local_env.CrystalNN(
@@ -42,12 +42,14 @@ class MOFDataset(data.Dataset):
             data_conf,
             diffuser,
             is_training,
+            is_testing=False,
         ):
 
         self.cached_data = torch.load(cache_path)
 
         self._log = logging.getLogger(__name__)
         self._is_training = is_training
+        self._is_testing = is_testing
         self._data_conf = data_conf
         self._diffuser = diffuser
 
@@ -71,13 +73,12 @@ class MOFDataset(data.Dataset):
         quat = torch.tensor(du.rotvec_to_quat(du.matrix_to_rotvec(R)), dtype=torch.float32)
 
         for i, bb in enumerate(mof.pyg_mols):
-            x = frac_to_cart_coords(bb.frac_coords, mof.lengths, mof.angles, bb.num_atoms)
+            cart_coord_bb = frac_to_cart_coords(bb.frac_coords, mof.lengths, mof.angles, bb.num_atoms) # [num_bb_atoms, 3]
+            centroid_bb = cart_coord_bb.mean(dim=0) # [3]
 
-            # Center the coordinates
-            centroid = x.mean(dim=0)
-            bb.pos = x - centroid # canonical bb coordinates
+            bb.cart_coord_centered = cart_coord_bb - centroid_bb # canonical bb coordinates
 
-            rigids_0[i] = torch.cat([quat, centroid])
+            rigids_0[i] = torch.cat([quat, centroid_bb])
 
         return rigids_0 
 
@@ -127,18 +128,18 @@ class MOFDataset(data.Dataset):
         _rigids_t = rigid_utils.Rigid.from_tensor_7(diff_feats_t['rigids_t'])
         _rigids_0 = rigid_utils.Rigid.from_tensor_7(rigids_0)
         for i, bb in enumerate(data.pyg_mols):
-            bb_pos_t = _rigids_t[i].apply(bb.pos)
-            bb_pos_0 = _rigids_0[i].apply(bb.pos)
+            bb_pos_t = _rigids_t[i].apply(bb.cart_coord_centered)
+            bb_pos_0 = _rigids_0[i].apply(bb.cart_coord_centered)
 
             x_t.append(bb_pos_t)
             x_0.append(bb_pos_0)
-            x_bb.append(bb.pos)
+            x_bb.append(bb.cart_coord_centered)
             atom_types.append(bb.atom_types)
         
-        atom_types = torch.cat(atom_types, dim=0)
         x_t = torch.cat(x_t, dim=0)
         x_0 = torch.cat(x_0, dim=0)
         x_bb = torch.cat(x_bb, dim=0)
+        atom_types = torch.cat(atom_types, dim=0)
         num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
 
         feats['x_0'] = x_0
@@ -147,6 +148,8 @@ class MOFDataset(data.Dataset):
         feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms
         feats['num_bb_atoms'] = num_bb_atoms
+        feats['num_bbs'] = data.num_components
+        feats['lattice'] = torch.cat([data.lengths, data.angles])
 
         feats['res_mask'] = torch.ones(data.num_components)
         feats['fixed_mask'] = torch.zeros(data.num_components)
@@ -154,6 +157,10 @@ class MOFDataset(data.Dataset):
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
         feats = tree.map_structure(
             lambda x: x if torch.is_tensor(x) else torch.tensor(x), feats)
+        
+        if self._is_testing:
+            feats['name'] = name
+
         return feats
 
 class TrainSampler(data.Sampler):

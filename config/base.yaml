@@ -18,7 +18,7 @@ data:
     min_beta_percent: -1.0
     rog_quantile: 0.96
   min_t: 0.01
-  samples_per_eval_length: 4
+  samples_per_eval_length: 1
   num_eval_lengths: 10
   num_t: 100
 
@@ -122,7 +122,7 @@ experiment:
 
 hydra:
   run:
-    dir: ${oc.env:HYDRA_JOBS}/${experiment.name}
+    dir: ${oc.env:HYDRA_JOBS}/singlerun/${experiment.name}
   sweeper:
     params:
       # Example of hydra multi run and wandb.
