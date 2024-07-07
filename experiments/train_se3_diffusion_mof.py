@@ -247,6 +247,7 @@ class Experiment:
             config=dict(eu.flatten_dict(conf_dict)),
             dir=self._exp_conf.wandb_dir,
         )
+        wandb.watch(self.model, log='all', log_freq=100)
         self._exp_conf.run_id = wandb.util.generate_id()
         self._exp_conf.wandb_dir = wandb.run.dir
         self._log.info(
@@ -400,9 +401,6 @@ class Experiment:
                 wandb_logs = {
                     'loss': loss,
                     'rotation_loss': aux_data['rot_loss'],
-                    'translation_loss': aux_data['trans_loss'],
-                    'bb_atom_loss': aux_data['bb_atom_loss'],
-                    'dist_mat_loss': aux_data['batch_dist_mat_loss'],
                     'batch_size': aux_data['examples_per_step'],
                     'num_bbs': aux_data['num_bbs'],
                     'examples_per_sec': example_per_sec,
@@ -416,35 +414,8 @@ class Experiment:
                     loss_name='rot_loss',
                 ))
 
-                wandb_logs.update(eu.t_stratified_loss(
-                    du.move_to_np(train_feats['t']),
-                    du.move_to_np(aux_data['batch_trans_loss']),
-                    loss_name='trans_loss',
-                ))
-
-                wandb_logs.update(eu.t_stratified_loss(
-                    du.move_to_np(train_feats['t']),
-                    du.move_to_np(aux_data['batch_bb_atom_loss']),
-                    loss_name='bb_atom_loss',
-                ))
-
-                wandb_logs.update(eu.t_stratified_loss(
-                    du.move_to_np(train_feats['t']),
-                    du.move_to_np(aux_data['batch_dist_mat_loss']),
-                    loss_name='dist_mat_loss',
-                ))
-
                 if ckpt_metrics is not None:
                     wandb_logs['eval_time'] = eval_time
-                    # for metric_name in metrics.ALL_METRICS:
-                    #     wandb_logs[metric_name] = ckpt_metrics[metric_name].mean()
-                    # eval_table = wandb.Table(
-                    #     columns=ckpt_metrics.columns.to_list()+['structure'])
-                    # for _, row in ckpt_metrics.iterrows():
-                    #     pdb_path = row['sample_path']
-                    #     row_metrics = row.to_list() + [wandb.Molecule(pdb_path)]
-                    #     eval_table.add_data(*row_metrics)
-                    # wandb_logs['sample_metrics'] = eval_table
                     wandb_logs.update(ckpt_metrics)
 
                 wandb.log(wandb_logs, step=self.trained_steps)
@@ -478,75 +449,9 @@ class Experiment:
         ckpt_metrics = {
             'val_loss': np.mean(log_losses['total_loss']),
             'val_rot_loss': np.mean(log_losses['rot_loss']),
-            'val_trans_loss': np.mean(log_losses['trans_loss'])
         }
 
         return ckpt_metrics
-            
-    # def eval_fn(self, eval_dir, valid_loader, device, min_t=None, num_t=None, noise_scale=1.0):
-    #     ckpt_eval_metrics = []
-    #     for valid_feats, pdb_names in valid_loader:
-    #         res_mask = du.move_to_np(valid_feats['res_mask'].bool())
-    #         fixed_mask = du.move_to_np(valid_feats['fixed_mask'].bool())
-    #         aatype = du.move_to_np(valid_feats['aatype'])
-    #         gt_prot = du.move_to_np(valid_feats['atom37_pos'])
-    #         batch_size = res_mask.shape[0]
-    #         valid_feats = tree.map_structure(
-    #             lambda x: x.to(device), valid_feats)
-
-    #         # Run inference
-    #         infer_out = self.inference_fn(
-    #             valid_feats, min_t=min_t, num_t=num_t, noise_scale=noise_scale)
-    #         final_prot = infer_out['prot_traj'][0]
-    #         for i in range(batch_size):
-    #             num_res = int(np.sum(res_mask[i]).item())
-    #             unpad_fixed_mask = fixed_mask[i][res_mask[i]]
-    #             unpad_diffused_mask = 1 - unpad_fixed_mask
-    #             unpad_prot = final_prot[i][res_mask[i]]
-    #             unpad_gt_prot = gt_prot[i][res_mask[i]]
-    #             unpad_gt_aatype = aatype[i][res_mask[i]]
-    #             percent_diffused = np.sum(unpad_diffused_mask) / num_res
-
-    #             # Extract argmax predicted aatype
-    #             saved_path = au.write_prot_to_pdb(
-    #                 unpad_prot,
-    #                 os.path.join(
-    #                     eval_dir,
-    #                     f'len_{num_res}_sample_{i}_diffused_{percent_diffused:.2f}.pdb'
-    #                 ),
-    #                 no_indexing=True,
-    #                 b_factors=np.tile(1 - unpad_fixed_mask[..., None], 37) * 100
-    #             )
-    #             try:
-    #                 sample_metrics = metrics.protein_metrics(
-    #                     pdb_path=saved_path,
-    #                     atom37_pos=unpad_prot,
-    #                     gt_atom37_pos=unpad_gt_prot,
-    #                     gt_aatype=unpad_gt_aatype,
-    #                     diffuse_mask=unpad_diffused_mask,
-    #                 )
-    #             except ValueError as e:
-    #                 self._log.warning(
-    #                     f'Failed evaluation of length {num_res} sample {i}: {e}')
-    #                 continue
-    #             sample_metrics['step'] = self.trained_steps
-    #             sample_metrics['num_res'] = num_res
-    #             sample_metrics['fixed_residues'] = np.sum(unpad_fixed_mask)
-    #             sample_metrics['diffused_percentage'] = percent_diffused
-    #             sample_metrics['sample_path'] = saved_path
-    #             sample_metrics['gt_pdb'] = pdb_names[i]
-    #             ckpt_eval_metrics.append(sample_metrics)
-
-    #     # Save metrics as CSV.
-    #     eval_metrics_csv_path = os.path.join(eval_dir, 'metrics.csv')
-    #     ckpt_eval_metrics = pd.DataFrame(ckpt_eval_metrics)
-    #     ckpt_eval_metrics.to_csv(eval_metrics_csv_path, index=False)
-    #     return ckpt_eval_metrics
-
-    def _self_conditioning(self, batch):
-        model_sc = self.model(batch)
-        batch['sc_ca_t'] = model_sc['rigids'][..., 4:]
-        return batch
 
     def loss_fn(self, batch):
         """Computes loss and auxiliary data.
@@ -569,35 +474,10 @@ class Experiment:
         batch_size, num_res = bb_mask.shape
 
         gt_rot_score = batch['rot_score']
-        gt_trans_score = batch['trans_score']
         rot_score_scaling = batch['rot_score_scaling']
-        trans_score_scaling = batch['trans_score_scaling']
         batch_loss_mask = torch.any(bb_mask, dim=-1)
 
         pred_rot_score = model_out['rot_score'] * diffuse_mask[..., None]
-        pred_trans_score = model_out['trans_score'] * diffuse_mask[..., None]
-
-        # Translation score loss
-        trans_score_mse = (gt_trans_score - pred_trans_score)**2 * loss_mask[..., None]
-        trans_score_loss = torch.sum(
-            trans_score_mse / trans_score_scaling[:, None, None]**2,
-            dim=(-1, -2)
-        ) / (loss_mask.sum(dim=-1) + 1e-10)
-
-        # Translation x0 loss
-        gt_trans_x0 = batch['rigids_0'][..., 4:] * self._exp_conf.coordinate_scaling
-        pred_trans_x0 = model_out['rigids'][..., 4:] * self._exp_conf.coordinate_scaling
-        trans_x0_loss = torch.sum(
-            (gt_trans_x0 - pred_trans_x0)**2 * loss_mask[..., None],
-            dim=(-1, -2)
-        ) / (loss_mask.sum(dim=-1) + 1e-10)
-
-        trans_loss = (
-            trans_score_loss * (batch['t'] > self._exp_conf.trans_x0_threshold)
-            + trans_x0_loss * (batch['t'] <= self._exp_conf.trans_x0_threshold)
-        )
-        trans_loss *= self._exp_conf.trans_loss_weight
-        trans_loss *= int(self._diff_conf.diffuse_trans)
 
         # Rotation loss
         if self._exp_conf.separate_rot_loss:
@@ -632,66 +512,7 @@ class Experiment:
             rot_loss *= batch['t'] > self._exp_conf.rot_loss_t_threshold
         rot_loss *= int(self._diff_conf.diffuse_rot)
 
-
-        # Backbone atom loss
-        if self._exp_conf.aux_loss_weight is None: # skip aux loss
-            bb_atom_loss = torch.zeros_like(rot_loss).to(rot_loss.device)
-            dist_mat_loss = torch.zeros_like(rot_loss).to(rot_loss.device)
-        else:
-            pred_atom37 = model_out['atom37'][:, :, :5]
-            gt_rigids = ru.Rigid.from_tensor_7(batch['rigids_0'].type(torch.float32))
-            gt_psi = batch['torsion_angles_sin_cos'][..., 2, :]
-            gt_atom37, atom37_mask, _, _ = all_atom.compute_backbone(
-                gt_rigids, gt_psi)
-            gt_atom37 = gt_atom37[:, :, :5]
-            atom37_mask = atom37_mask[:, :, :5]
-
-            gt_atom37 = gt_atom37.to(pred_atom37.device)
-            atom37_mask = atom37_mask.to(pred_atom37.device)
-            bb_atom_loss_mask = atom37_mask * loss_mask[..., None]
-            bb_atom_loss = torch.sum(
-                (pred_atom37 - gt_atom37)**2 * bb_atom_loss_mask[..., None],
-                dim=(-1, -2, -3)
-            ) / (bb_atom_loss_mask.sum(dim=(-1, -2)) + 1e-10)
-            bb_atom_loss *= self._exp_conf.bb_atom_loss_weight
-            bb_atom_loss *= batch['t'] < self._exp_conf.bb_atom_loss_t_filter
-            bb_atom_loss *= self._exp_conf.aux_loss_weight
-
-            # Pairwise distance loss
-            gt_flat_atoms = gt_atom37.reshape([batch_size, num_res*5, 3])
-            gt_pair_dists = torch.linalg.norm(
-                gt_flat_atoms[:, :, None, :] - gt_flat_atoms[:, None, :, :], dim=-1)
-            pred_flat_atoms = pred_atom37.reshape([batch_size, num_res*5, 3])
-            pred_pair_dists = torch.linalg.norm(
-                pred_flat_atoms[:, :, None, :] - pred_flat_atoms[:, None, :, :], dim=-1)
-
-            flat_loss_mask = torch.tile(loss_mask[:, :, None], (1, 1, 5))
-            flat_loss_mask = flat_loss_mask.reshape([batch_size, num_res*5])
-            flat_res_mask = torch.tile(bb_mask[:, :, None], (1, 1, 5))
-            flat_res_mask = flat_res_mask.reshape([batch_size, num_res*5])
-
-            gt_pair_dists = gt_pair_dists * flat_loss_mask[..., None]
-            pred_pair_dists = pred_pair_dists * flat_loss_mask[..., None]
-            pair_dist_mask = flat_loss_mask[..., None] * flat_res_mask[:, None, :]
-
-            # No loss on anything >6A
-            proximity_mask = gt_pair_dists < 6
-            pair_dist_mask  = pair_dist_mask * proximity_mask
-
-            dist_mat_loss = torch.sum(
-                (gt_pair_dists - pred_pair_dists)**2 * pair_dist_mask,
-                dim=(1, 2))
-            dist_mat_loss /= (torch.sum(pair_dist_mask, dim=(1, 2)) - num_res)
-            dist_mat_loss *= self._exp_conf.dist_mat_loss_weight
-            dist_mat_loss *= batch['t'] < self._exp_conf.dist_mat_loss_t_filter
-            dist_mat_loss *= self._exp_conf.aux_loss_weight
-
-        final_loss = (
-            rot_loss
-            + trans_loss
-            + bb_atom_loss
-            + dist_mat_loss
-        )
+        final_loss = rot_loss
 
         def normalize_loss(x):
             return x.sum() /  (batch_loss_mask.sum() + 1e-10)
@@ -699,14 +520,8 @@ class Experiment:
         aux_data = {
             'batch_train_loss': final_loss,
             'batch_rot_loss': rot_loss,
-            'batch_trans_loss': trans_loss,
-            'batch_bb_atom_loss': bb_atom_loss,
-            'batch_dist_mat_loss': dist_mat_loss,
             'total_loss': normalize_loss(final_loss),
             'rot_loss': normalize_loss(rot_loss),
-            'trans_loss': normalize_loss(trans_loss),
-            'bb_atom_loss': normalize_loss(bb_atom_loss),
-            'dist_mat_loss': normalize_loss(dist_mat_loss),
             'examples_per_step': torch.tensor(batch_size),
             'num_bbs': torch.mean(torch.sum(bb_mask, dim=-1)),
         }

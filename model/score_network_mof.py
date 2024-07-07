@@ -169,6 +169,11 @@ class ScoreNetwork(nn.Module):
         Args:
             X: the noised samples from the noising process, of shape [Batch, N, D].
                 Where the T time steps are t=1,...,T (i.e. not including the un-noised X^0)
+                - t: [B,]
+                - x_t: [B, N, 3]
+                - rot_score: [B, M, 3]
+                - atom_types: [B, N]
+                - num_bb_atoms: [B, M]
 
         Returns:
             model_out: dictionary of model outputs.
@@ -198,17 +203,9 @@ class ScoreNetwork(nn.Module):
         # Run main network 
         model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)
 
-        # Predicted coordinates
-        pred_rigid = model_out['final_rigids']
-        # pred_rigid = Rigid.from_tensor_7(input_feats['rigids_0']) # check x_0 = rigids_0 (*) x_bb
-        x_pred = self.compute_coords(input_feats, pred_rigid)
-        
         pred_out = {
-            'psi': None,
             'rot_score': model_out['rot_score'],
-            'trans_score': model_out['trans_score'],
-            'rigids': model_out['final_rigids'].to_tensor_7(),
-            'x_pred': x_pred,
+            'trans_score': model_out['trans_score']
         }
 
         return pred_out

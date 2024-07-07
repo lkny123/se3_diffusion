@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+import os
 import tree
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ from pymatgen.core.structure import Structure
 from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.graphs import StructureGraph
 from pymatgen.analysis import local_env
+from pymatgen.io.cif import CifWriter
 
 from mofdiff.common.atomic_utils import frac2cart
 from mofdiff.common.data_utils import frac_to_cart_coords
@@ -70,16 +72,23 @@ class MOFDataset(data.Dataset):
         rot_sigma = self._data_conf.rot_sigma_min ** (1-t_rot) * self._data_conf.rot_sigma_max ** t_rot
         return tr_sigma, rot_sigma
     
-    def get_cart_x_centered(self, data):
-        cart_coord = frac_to_cart_coords(data.frac_coords, data.lengths, data.angles, data.num_atoms)
-        centroid = cart_coord.mean(dim=0)
-        return cart_coord - centroid
+    def get_cart_coords_centered(self, data):
+        frac_coords = torch.cat([bb.frac_coords for bb in data.pyg_mols])
+        cart_coords = frac_to_cart_coords(frac_coords, data.lengths, data.angles, data.num_atoms)
+        centroid = cart_coords.mean(dim=0)
+        return cart_coords - centroid
 
-    def noise_transform(self, x_0, t):
+    def get_cart_coords(self, data):
+        frac_coords = torch.cat([bb.frac_coords for bb in data.pyg_mols])
+        cart_coords = frac_to_cart_coords(frac_coords, data.lengths, data.angles, data.num_atoms)
+        return cart_coords
+
+    def noise_transform(self, x_0, t, num_bb_atoms):
         """
         Args:
-            x_0: [num_atoms, 3]
+            x_0: [num_atoms, 3], ground truth coordinates
             t: random timestep 
+            num_bb_atoms: [num_components,], number of atoms in each building block
 
         Returns:
             x_t: [num_atoms, 3]
@@ -87,17 +96,38 @@ class MOFDataset(data.Dataset):
         """
         t_tr, t_rot = t, t
 
-        rot_update = self._diffuser._so3_diffuser.sample(t_rot)
-        rot_score = self._diffuser._so3_diffuser.score(rot_update, t)
+        num_components = len(num_bb_atoms)
+        rot_update = self._diffuser._so3_diffuser.sample(t_rot, num_components) # [num_components, 3]
+        rot_score = self._diffuser._so3_diffuser.score(rot_update, t).squeeze() # [num_components, 3]
+        rot_score_scaling = self.diffuser._so3_diffuser.score_scaling(t) # np.float64
 
-        # update conformation
-        centroid = x_0.mean(dim=0)
-        rot_mat = du.rotvec_to_matrix(rot_update.squeeze())
-        x_t = (x_0 - centroid) @ rot_mat.T + centroid
+        # update conformation: rotate each building block
+        start_idx = 0
+        x_t = [] 
+        for i, num_atoms in enumerate(num_bb_atoms):
+            bb_coords = x_0[start_idx:start_idx+num_atoms]          # [num_bb_atoms, 3]
+            bb_centroid = torch.mean(x_0, dim=0, keepdim=True)      # [1, 3]
+            bb_rot_mat = du.rotvec_to_matrix(rot_update[i])
+            x_bb_t = (bb_coords - bb_centroid) @ bb_rot_mat.T + bb_centroid
 
-        return x_t, rot_score.squeeze()
+            x_t.append(x_bb_t)
+            start_idx += num_atoms
+        
+        x_t = torch.cat(x_t, dim=0).float()
+        return x_t, rot_score, rot_score_scaling.astype(np.float32)
 
-
+    def visualize(self, data, cart_coords, atom_types, t):
+        lattice = Lattice.from_parameters(*data.lengths[0], *data.angles[0])
+        structure = Structure(
+            lattice=lattice,
+            species=atom_types,
+            coords=cart_coords.numpy(),
+            coords_are_cartesian=True
+        )
+        cif_path = os.path.join(f'{data.m_id}_{t}.cif')
+        cif_writer = CifWriter(structure)
+        cif_writer.write_file(cif_path)
+    
     def __len__(self):
         return len(self.cached_data)
 
@@ -117,7 +147,9 @@ class MOFDataset(data.Dataset):
 
         data = self.cached_data[idx]
         name = data.m_id
-        x_0 = self.get_cart_x_centered(data)
+        x_0 = self.get_cart_coords_centered(data)
+        num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
+        atom_types = torch.cat([bb.atom_types for bb in data.pyg_mols]) 
 
         # Use a fixed seed for evaluation.
         if self.is_training:
@@ -126,14 +158,21 @@ class MOFDataset(data.Dataset):
             rng = np.random.default_rng(idx)
 
         t = rng.uniform(self._data_conf.min_t, 1.0)
-        x_t, rot_score = self.noise_transform(x_0, t)
+        x_t, rot_score, rot_score_scaling = self.noise_transform(x_0, t, num_bb_atoms)
+
+        ##### Visualization ##### 
+        # self.visualize(data, x_0, atom_types, 0)
+        # self.visualize(data, x_t, atom_types, t)
+        #########################
 
         feats['t'] = t
         feats['x_t'] = x_t
         feats['rot_score'] = rot_score
+        feats['rot_score_scaling'] = rot_score_scaling
 
-        feats['atom_types'] = data.atom_types
+        feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms
+        feats['num_bb_atoms'] = num_bb_atoms
 
         feats['res_mask'] = torch.ones(data.num_components)
         feats['fixed_mask'] = torch.zeros(data.num_components)

@@ -195,7 +195,7 @@ class EGNNScore(nn.Module):
         
         in_node_nf = model_conf.node_embed_size
         hidden_nf = model_conf.hidden_dim
-        out_node_nf=7
+        out_node_nf = model_conf.hidden_dim
         in_edge_nf = model_conf.edge_embed_size
         if model_conf.act_fn == 'silu':
             act_fn = nn.SiLU()
@@ -203,7 +203,12 @@ class EGNNScore(nn.Module):
 
         self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
         self.diffuser = diffuser
-        
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_nf, hidden_nf),
+            nn.ReLU(),
+            nn.Linear(hidden_nf, 6)
+        )
+
         self.scale_pos = lambda x: x * model_conf.ipa.coordinate_scaling
         self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
 
@@ -219,41 +224,23 @@ class EGNNScore(nn.Module):
 
         # predict denoised rigids 
         h = rearrange(h, '(b n) d -> b n d', b=batch_size, n=num_atoms)
+
+        # output layer
         num_bb_atoms = input_feats['num_bb_atoms'][0]
-        num_bbs = len(num_bb_atoms)
-
-        curr_rigids = Rigid.from_tensor_7(input_feats['rigids_t'])
-        curr_rigids = self.scale_rigids(curr_rigids)
-
-        rigid_update = torch.zeros(batch_size, num_bbs, 7).to(h.device)
         start_idx = 0
-        for i, num_bb_atom in enumerate(num_bb_atoms):
-            rigid_update[:, i, :] = h[:, start_idx:start_idx + num_bb_atom, :].mean(dim=1)
-            start_idx += num_bb_atom
-        
-        curr_rigids = curr_rigids.compose_q_update_vec(rigid_update)
-        curr_rigids = self.unscale_rigids(curr_rigids)
+        scores = [] 
+        for i, num_atom in enumerate(num_bb_atoms):
+            scores.append(h[:, start_idx:start_idx+num_atom, :].mean(dim=1))
+            start_idx += num_atom
+        scores = torch.stack(scores, dim=1)
+        scores = self.fc(scores)
 
-        # compute scores
-        init_rigids = Rigid.from_tensor_7(input_feats['rigids_t'])
-
-        rot_score = self.diffuser.calc_rot_score(
-            init_rigids.get_rots(),
-            curr_rigids.get_rots(),
-            input_feats['t']
-        )
-
-        trans_score = self.diffuser.calc_trans_score(
-            init_rigids.get_trans(),
-            curr_rigids.get_trans(),
-            input_feats['t'][:, None, None],
-            use_torch=True
-        )
+        rot_score = scores[:, :, :3]
+        trans_score = scores[:, :, 3:]
 
         model_out = {
             'rot_score': rot_score,
-            'trans_score': trans_score,
-            'final_rigids': curr_rigids,
+            'trans_score': trans_score
         }
         
         return model_out
