@@ -65,22 +65,38 @@ class MOFDataset(data.Dataset):
     def data_conf(self):
         return self._data_conf
 
-    def get_rigids_0(self, mof):
+    def t_to_sigma(self, t_tr, t_rot):
+        tr_sigma = self._data_conf.tr_sigma_min ** (1-t_tr) * self._data_conf.tr_sigma_max ** t_tr
+        rot_sigma = self._data_conf.rot_sigma_min ** (1-t_rot) * self._data_conf.rot_sigma_max ** t_rot
+        return tr_sigma, rot_sigma
+    
+    def get_cart_x_centered(self, data):
+        cart_coord = frac_to_cart_coords(data.frac_coords, data.lengths, data.angles, data.num_atoms)
+        centroid = cart_coord.mean(dim=0)
+        return cart_coord - centroid
 
-        rigids_0 = torch.zeros((mof.num_components, 7))
+    def noise_transform(self, x_0, t):
+        """
+        Args:
+            x_0: [num_atoms, 3]
+            t: random timestep 
 
-        R = np.eye(3)
-        quat = torch.tensor(du.rotvec_to_quat(du.matrix_to_rotvec(R)), dtype=torch.float32)
+        Returns:
+            x_t: [num_atoms, 3]
+            rot_score: [3,]
+        """
+        t_tr, t_rot = t, t
 
-        for i, bb in enumerate(mof.pyg_mols):
-            cart_coord_bb = frac_to_cart_coords(bb.frac_coords, mof.lengths, mof.angles, bb.num_atoms) # [num_bb_atoms, 3]
-            centroid_bb = cart_coord_bb.mean(dim=0) # [3]
+        rot_update = self._diffuser._so3_diffuser.sample(t_rot)
+        rot_score = self._diffuser._so3_diffuser.score(rot_update, t)
 
-            bb.cart_coord_centered = cart_coord_bb - centroid_bb # canonical bb coordinates
+        # update conformation
+        centroid = x_0.mean(dim=0)
+        rot_mat = du.rotvec_to_matrix(rot_update.squeeze())
+        x_t = (x_0 - centroid) @ rot_mat.T + centroid
 
-            rigids_0[i] = torch.cat([quat, centroid_bb])
+        return x_t, rot_score.squeeze()
 
-        return rigids_0 
 
     def __len__(self):
         return len(self.cached_data)
@@ -101,6 +117,7 @@ class MOFDataset(data.Dataset):
 
         data = self.cached_data[idx]
         name = data.m_id
+        x_0 = self.get_cart_x_centered(data)
 
         # Use a fixed seed for evaluation.
         if self.is_training:
@@ -108,48 +125,15 @@ class MOFDataset(data.Dataset):
         else:
             rng = np.random.default_rng(idx)
 
-        # Sample t and diffuse.
-        rigids_0 = self.get_rigids_0(data)
-        feats['rigids_0'] = rigids_0
-
-        gt_bb_rigid = rigid_utils.Rigid.from_tensor_7(rigids_0)
         t = rng.uniform(self._data_conf.min_t, 1.0)
-        diff_feats_t = self._diffuser.forward_marginal(
-            rigids_0=gt_bb_rigid,
-            t=t,
-            diffuse_mask=None
-        )
-        feats.update(diff_feats_t)
+        x_t, rot_score = self.noise_transform(x_0, t)
+
         feats['t'] = t
-
-        # get noised coordinates x_t, atom_types
-        x_t, x_0, x_bb = [], [], []
-        atom_types = []
-        _rigids_t = rigid_utils.Rigid.from_tensor_7(diff_feats_t['rigids_t'])
-        _rigids_0 = rigid_utils.Rigid.from_tensor_7(rigids_0)
-        for i, bb in enumerate(data.pyg_mols):
-            bb_pos_t = _rigids_t[i].apply(bb.cart_coord_centered)
-            bb_pos_0 = _rigids_0[i].apply(bb.cart_coord_centered)
-
-            x_t.append(bb_pos_t)
-            x_0.append(bb_pos_0)
-            x_bb.append(bb.cart_coord_centered)
-            atom_types.append(bb.atom_types)
-        
-        x_t = torch.cat(x_t, dim=0)
-        x_0 = torch.cat(x_0, dim=0)
-        x_bb = torch.cat(x_bb, dim=0)
-        atom_types = torch.cat(atom_types, dim=0)
-        num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
-
-        feats['x_0'] = x_0
         feats['x_t'] = x_t
-        feats['x_bb'] = x_bb
-        feats['atom_types'] = atom_types
+        feats['rot_score'] = rot_score
+
+        feats['atom_types'] = data.atom_types
         feats['num_atoms'] = data.num_atoms
-        feats['num_bb_atoms'] = num_bb_atoms
-        feats['num_bbs'] = data.num_components
-        feats['lattice'] = torch.cat([data.lengths, data.angles])
 
         feats['res_mask'] = torch.ones(data.num_components)
         feats['fixed_mask'] = torch.zeros(data.num_components)
