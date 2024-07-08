@@ -92,7 +92,7 @@ class MOFDataset(data.Dataset):
 
         Returns:
             x_t: [num_atoms, 3]
-            rot_score: [3,]
+            rot_score: [num_components, 3]
         """
         t_tr, t_rot = t, t
 
@@ -134,13 +134,13 @@ class MOFDataset(data.Dataset):
     def __getitem__(self, idx):
         """
         Returns: dictionary with following keys:
-            - rigids_0: [num_components, 7]
-            - rigids_t: [num_components, 7]
+            - t: float
             - x_t: [num_atoms, 3]
+            - rot_score: [num_components, 3]
+            - rot_score_scaling: float
             - atom_types: [num_atoms]
             - num_atoms: int
             - num_bb_atoms: [num_components]
-            - t: float
         """
 
         feats = {}

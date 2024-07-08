@@ -98,7 +98,7 @@ class E_GCL(nn.Module):
         radial, coord_diff = self.coord2radial(edge_index, coord)
 
         edge_feat = self.edge_model(h[row], h[col], radial, edge_attr)
-        coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
+        # coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
         h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
 
         return h, coord, edge_attr
@@ -205,15 +205,7 @@ class EGNNScore(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(hidden_nf, hidden_nf),
             nn.ReLU(),
-            nn.Linear(hidden_nf, 6)
-        )
-        self.transformer_layer = torch.nn.TransformerEncoderLayer(
-            d_model=hidden_nf,
-            nhead=model_conf.ipa.seq_tfmr_num_heads,
-            dim_feedforward=hidden_nf,
-            batch_first=True,
-            dropout=0.0,
-            norm_first=False
+            nn.Linear(hidden_nf, 3)
         )
 
         self.diffuser = diffuser
@@ -230,7 +222,6 @@ class EGNNScore(nn.Module):
         # obtain node embeddings 
         x = self.scale_pos(x)
         h, _ = self.egnn(h, x, edges, edge_attr)
-        h = self.transformer_layer(h)
 
         # predict denoised rigids 
         h = rearrange(h, '(b n) d -> b n d', b=batch_size, n=num_atoms)
@@ -245,12 +236,8 @@ class EGNNScore(nn.Module):
         scores = torch.stack(scores, dim=1)
         scores = self.fc(scores)
 
-        rot_score = scores[:, :, :3]
-        trans_score = scores[:, :, 3:]
-
         model_out = {
-            'rot_score': rot_score,
-            'trans_score': trans_score
+            'rot_score': scores,
         }
         
         return model_out
