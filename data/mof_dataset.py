@@ -114,7 +114,7 @@ class MOFDataset(data.Dataset):
             start_idx += num_atoms
         
         x_t = torch.cat(x_t, dim=0).float()
-        return x_t, rot_score, rot_score_scaling.astype(np.float32)
+        return x_t, rot_score.astype(np.float32), rot_score_scaling.astype(np.float32)
 
     def visualize(self, data, cart_coords, atom_types, t):
         lattice = Lattice.from_parameters(*data.lengths[0], *data.angles[0])
@@ -151,13 +151,8 @@ class MOFDataset(data.Dataset):
         num_bb_atoms = torch.tensor([bb.num_atoms for bb in data.pyg_mols])
         atom_types = torch.cat([bb.atom_types for bb in data.pyg_mols]) 
 
-        # Use a fixed seed for evaluation.
-        if self.is_training:
-            rng = np.random.default_rng(None)
-        else:
-            rng = np.random.default_rng(idx)
-
-        t = rng.uniform(self._data_conf.min_t, 1.0)
+        # apply random noise
+        t = np.random.uniform(self._data_conf.min_t, 1.0)
         x_t, rot_score, rot_score_scaling = self.noise_transform(x_0, t, num_bb_atoms)
 
         ##### Visualization ##### 
@@ -177,7 +172,6 @@ class MOFDataset(data.Dataset):
         feats['res_mask'] = torch.ones(data.num_components)
         feats['fixed_mask'] = torch.zeros(data.num_components)
 
-        # https://pytorch-geometric.readthedocs.io/en/latest/notes/batching.html
         feats = tree.map_structure(
             lambda x: x if torch.is_tensor(x) else torch.tensor(x), feats)
         
