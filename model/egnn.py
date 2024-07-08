@@ -202,12 +202,21 @@ class EGNNScore(nn.Module):
         n_layers = model_conf.n_layers
 
         self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
-        self.diffuser = diffuser
         self.fc = nn.Sequential(
             nn.Linear(hidden_nf, hidden_nf),
             nn.ReLU(),
             nn.Linear(hidden_nf, 6)
         )
+        self.transformer_layer = torch.nn.TransformerEncoderLayer(
+            d_model=hidden_nf,
+            nhead=model_conf.ipa.seq_tfmr_num_heads,
+            dim_feedforward=hidden_nf,
+            batch_first=True,
+            dropout=0.0,
+            norm_first=False
+        )
+
+        self.diffuser = diffuser
 
         self.scale_pos = lambda x: x * model_conf.ipa.coordinate_scaling
         self.scale_rigids = lambda x: x.apply_trans_fn(self.scale_pos)
@@ -221,6 +230,7 @@ class EGNNScore(nn.Module):
         # obtain node embeddings 
         x = self.scale_pos(x)
         h, _ = self.egnn(h, x, edges, edge_attr)
+        h = self.transformer_layer(h)
 
         # predict denoised rigids 
         h = rearrange(h, '(b n) d -> b n d', b=batch_size, n=num_atoms)

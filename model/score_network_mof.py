@@ -87,7 +87,7 @@ class Embedder(nn.Module):
         self.atom_embedder = nn.Embedding(model_conf.max_atoms, index_embed_size)
 
         # RBF for embedding edge distances
-        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.max_radius, index_embed_size)
+        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.cross_max_distance, index_embed_size)
 
     def _cross_concat(self, feats_1d, num_batch, num_atoms):
         return torch.cat([

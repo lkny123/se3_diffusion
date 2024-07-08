@@ -231,7 +231,7 @@ class Experiment:
             sampler=valid_sampler,
             np_collate=False,
             length_batch=True,
-            batch_size=self._exp_conf.eval_batch_size,
+            batch_size=1,
             shuffle=False,
             num_workers=0,
             drop_last=False,

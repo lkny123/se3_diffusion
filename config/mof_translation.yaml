@@ -6,7 +6,7 @@ data:
   cache_dir: ${oc.env:PROJECT_ROOT}/data/mof/cif_inf_100
 
 diffuser:
-  diffuse_rot: False
+  diffuse_rot: True
 
 experiment:
   name: mof_translation
@@ -14,13 +14,14 @@ experiment:
   # training mode
   use_ddp: False
   # Take early checkpoint at step 100. Helpful for catching eval bugs early.
-  early_ckpt: True
+  early_ckpt: False
 
   # Training arguments
   log_freq: 1000
   num_epoch: 4000
-  batch_size: 256
-  max_squared_res: 100000 # adjust this instead of batch size 
+  batch_size: 8
+  learning_rate: 0.0001
+  max_squared_res: 50000 # adjust this instead of batch size 
   rot_loss_t_threshold: 0.0
   rot_loss_weight: 1.0
   separate_rot_loss: False
@@ -33,13 +34,14 @@ experiment:
   project: TEST
 
   # How many steps to checkpoint between.
-  ckpt_freq: 5000
+  ckpt_freq: 10000
 
 model:
-  max_radius: 10
-  max_neighbors: 32
+  max_radius: .inf
+  max_neighbors: 100
   max_atoms: 100
+  cross_max_distance: 80
   time_dim: 256
-  hidden_dim: 256
+  hidden_dim: 512
   act_fn: silu
   n_layers: 6

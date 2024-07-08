@@ -6,6 +6,7 @@ multirun/
 wandb/
 *.pdb
 *.csv
+*.cif
 
 inference_outputs/
 # Byte-compiled / optimized / DLL files
