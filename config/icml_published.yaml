@@ -5,6 +5,7 @@ data:
   cluster_path: null
 
 diffuser:
+  diffuse_rot: False
   so3:
     use_cached_score: True
 

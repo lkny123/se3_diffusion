@@ -825,7 +825,7 @@ class Experiment:
         return ret
 
 
-@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "config"), config_name="mof_translation")
+@hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "config"), config_name="icml_published")
 def run(conf: DictConfig) -> None:
 
     # Fixes bug in https://github.com/wandb/wandb/issues/1525
