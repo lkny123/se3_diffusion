@@ -87,7 +87,7 @@ class Embedder(nn.Module):
         self.atom_embedder = nn.Embedding(model_conf.max_atoms, index_embed_size)
 
         # RBF for embedding edge distances
-        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.cross_max_distance, index_embed_size)
+        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.rbf_max, index_embed_size)
 
     def _cross_concat(self, feats_1d, num_batch, num_atoms):
         return torch.cat([
@@ -158,11 +158,6 @@ class ScoreNetwork(nn.Module):
             model_conf=model_conf,
             diffuser=diffuser,
         )
-        self.rot_final_layer = nn.Sequential(
-            nn.Linear(1 + model_conf.embed.index_embed_size, model_conf.embed.index_embed_size),
-            nn.ReLU(), 
-            nn.Linear(model_conf.embed.index_embed_size, 1)
-            )
 
     def _apply_mask(self, aatype_diff, aatype_0, diff_mask):
         return diff_mask * aatype_diff + (1 - diff_mask) * aatype_0
@@ -208,16 +203,10 @@ class ScoreNetwork(nn.Module):
         
         # Run main network 
         model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)
-        
-        # Scale output scores
-        num_bbs = model_out['rot_score'].shape[1]
-        time_embed = torch.tile(
-            self.embedding_layer.timestep_embedder(input_feats['t'])[:, None, :], (1, num_bbs, 1)) # [B, M, D]
 
-        rot_score = model_out['rot_score']
-        rot_norm = torch.linalg.norm(rot_score, dim=-1, keepdim=True) # [B, M, 1]
-        rot_score = rot_score / rot_norm * self.rot_final_layer(torch.cat([rot_norm, time_embed], dim=-1)) # [B, M, 3]
-        rot_score = rot_score * input_feats['rot_score_scaling'][:, None, None]
+        # Compute scores
+        rot_pred = model_out['rot_pred'] # [B, M, 3]
+        rot_score = self.diffuser._so3_diffuser.torch_score(rot_pred, input_feats['t'])
 
         pred_out = {
             'rot_score': rot_score,

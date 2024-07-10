@@ -34,14 +34,6 @@ class E_GCL(nn.Module):
         layer = nn.Linear(hidden_nf, 1, bias=False)
         torch.nn.init.xavier_uniform_(layer.weight, gain=0.001)
 
-        coord_mlp = []
-        coord_mlp.append(nn.Linear(hidden_nf, hidden_nf))
-        coord_mlp.append(act_fn)
-        coord_mlp.append(layer)
-        if self.tanh:
-            coord_mlp.append(nn.Tanh())
-        self.coord_mlp = nn.Sequential(*coord_mlp)
-
         if self.attention:
             self.att_mlp = nn.Sequential(
                 nn.Linear(hidden_nf, 1),
@@ -70,18 +62,6 @@ class E_GCL(nn.Module):
             out = x + out
         return out, agg
 
-    def coord_model(self, coord, edge_index, coord_diff, edge_feat):
-        row, col = edge_index
-        trans = coord_diff * self.coord_mlp(edge_feat)
-        if self.coords_agg == 'sum':
-            agg = unsorted_segment_sum(trans, row, num_segments=coord.size(0))
-        elif self.coords_agg == 'mean':
-            agg = unsorted_segment_mean(trans, row, num_segments=coord.size(0))
-        else:
-            raise Exception('Wrong coords_agg parameter' % self.coords_agg)
-        coord += agg
-        return coord
-
     def coord2radial(self, edge_index, coord):
         row, col = edge_index
         coord_diff = coord[row] - coord[col]
@@ -98,7 +78,6 @@ class E_GCL(nn.Module):
         radial, coord_diff = self.coord2radial(edge_index, coord)
 
         edge_feat = self.edge_model(h[row], h[col], radial, edge_attr)
-        # coord = self.coord_model(coord, edge_index, coord_diff, edge_feat)
         h, agg = self.node_model(h, edge_index, edge_feat, node_attr)
 
         return h, coord, edge_attr
@@ -201,13 +180,6 @@ class EGNNScore(nn.Module):
             act_fn = nn.SiLU()
         n_layers = model_conf.n_layers
 
-        self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_nf, hidden_nf),
-            nn.ReLU(),
-            nn.Linear(hidden_nf, 3)
-        )
-
         self.diffuser = diffuser
 
         self.scale_pos = lambda x: x * model_conf.ipa.coordinate_scaling
@@ -215,6 +187,10 @@ class EGNNScore(nn.Module):
 
         self.unscale_pos = lambda x: x / model_conf.ipa.coordinate_scaling
         self.unscale_rigids = lambda x: x.apply_trans_fn(self.unscale_pos)
+
+        # layers
+        self.egnn = EGNN(in_node_nf, hidden_nf, out_node_nf, in_edge_nf, act_fn, n_layers, residual, attention, normalize, tanh)
+        self.linear = nn.Linear(hidden_nf, 3)
 
     def forward(self, h, x, edges, edge_attr, input_feats):
         batch_size, num_atoms = input_feats['atom_types'].shape
@@ -229,15 +205,15 @@ class EGNNScore(nn.Module):
         # output layer
         num_bb_atoms = input_feats['num_bb_atoms'][0]
         start_idx = 0
-        scores = [] 
+        rot_pred = [] 
         for i, num_atom in enumerate(num_bb_atoms):
-            scores.append(h[:, start_idx:start_idx+num_atom, :].mean(dim=1))
+            rot_pred.append(h[:, start_idx:start_idx+num_atom, :].mean(dim=1))
             start_idx += num_atom
-        scores = torch.stack(scores, dim=1)
-        scores = self.fc(scores)
+        rot_pred = torch.stack(rot_pred, dim=1)
+        rot_pred = self.linear(rot_pred)
 
         model_out = {
-            'rot_score': scores,
+            'rot_pred': rot_pred,
         }
         
         return model_out
