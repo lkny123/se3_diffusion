@@ -47,7 +47,7 @@ model:
   edge_embed_size: 128
   dropout: 0.0
   embed:
-    index_embed_size: 32
+    index_embed_size: 64
     aatype_embed_size: 64
     embed_self_conditioning: True
     num_bins: 22

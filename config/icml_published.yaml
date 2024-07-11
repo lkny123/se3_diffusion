@@ -5,9 +5,8 @@ data:
   cluster_path: null
 
 diffuser:
-  diffuse_rot: False
   so3:
-    use_cached_score: True
+    use_cached_score: False
 
 experiment:
   name: icml_published
@@ -18,6 +17,9 @@ experiment:
   rot_loss_weight: 1.0
   separate_rot_loss: False
   sample_mode: time_batch
+
+  # Plot score histogram
+  plot_rot_score: True
 
 hydra:
   sweeper:
