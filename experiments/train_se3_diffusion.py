@@ -553,6 +553,17 @@ class Experiment:
         pred_rot_score = model_out['rot_score'] * diffuse_mask[..., None]
         pred_trans_score = model_out['trans_score'] * diffuse_mask[..., None]
 
+        # Plot histogram of rot_score
+        if self._use_wandb and self._exp_conf.plot_rot_score:
+            gt_rot_score_cp = gt_rot_score.clone()
+            pred_rot_score_cp = pred_rot_score.clone()
+
+            hist_logs = {
+                'rot_score_hist': wandb.Histogram(gt_rot_score_cp.view(-1, 3).detach().cpu().numpy(), num_bins=50),
+                'rot_score_pred_hist': wandb.Histogram(pred_rot_score_cp.view(-1, 3).detach().cpu().numpy(), num_bins=50),
+            }
+            wandb.log(hist_logs, step=self.trained_steps)
+
         # Translation score loss
         trans_score_mse = (gt_trans_score - pred_trans_score)**2 * loss_mask[..., None]
         trans_score_loss = torch.sum(
