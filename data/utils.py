@@ -398,7 +398,7 @@ def length_batching(
         pad_example(x) for (_, x) in length_sorted[:max_batch_examples]]
     return torch.utils.data.default_collate(padded_batch)
 
-def length_batching_mof(
+def mof_batching(
         np_dicts: List[Dict[str, np.ndarray]],
         max_squared_res: int,
     ):
@@ -420,13 +420,17 @@ def create_data_loader(
         np_collate=False,
         max_squared_res=1e6,
         length_batch=False,
+        mof_batch=False,
         drop_last=False,
         prefetch_factor=2):
     """Creates a data loader with jax compatible data structures."""
     if np_collate:
         collate_fn = lambda x: concat_np_features(x, add_batch_dim=True)
     elif length_batch:
-        collate_fn = lambda x: length_batching_mof(
+        collate_fn = lambda x: length_batching(
+            x, max_squared_res=max_squared_res)
+    elif mof_batch:
+        collate_fn = lambda x: mof_batching(
             x, max_squared_res=max_squared_res)
     else:
         collate_fn = None

@@ -36,6 +36,7 @@ from omegaconf import DictConfig
 from omegaconf import OmegaConf
 from torch.nn import DataParallel as DP
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn import functional as F
 import torch.distributed as dist
 from openfold.utils import rigid_utils as ru
 from hydra.core.hydra_config import HydraConfig
@@ -43,12 +44,36 @@ from hydra.core.hydra_config import HydraConfig
 from analysis import utils as au
 from analysis import metrics
 from data import mof_dataset
+from data import mof_dataset_pyg
 from data import se3_diffuser
 from data import utils as du
+from data import so3_utils
 from data import all_atom
 from model import score_network_mof
 from experiments import utils as eu
 from common.utils import PROJECT_ROOT
+
+
+
+def rotation_matrix_cosine_loss(R_pred, R_true):
+    """
+    Args:
+        R_pred: (*, 3, 3).
+        R_true: (*, 3, 3).
+    Returns:
+        Per-matrix losses, (*, ).
+    """
+    size = list(R_pred.shape[:-2])
+    ncol = R_pred.numel() // 3
+
+    RT_pred = R_pred.transpose(-2, -1).reshape(ncol, 3) # (ncol, 3)
+    RT_true = R_true.transpose(-2, -1).reshape(ncol, 3) # (ncol, 3)
+
+    ones = torch.ones([ncol, ], dtype=torch.long, device=R_pred.device)
+    loss = F.cosine_embedding_loss(RT_pred, RT_true, ones, reduction='none')  # (ncol*3, )
+    loss = loss.reshape(size + [3]).sum(dim=-1)    # (*, )
+    return loss
+    
 
 
 class Experiment:
@@ -143,7 +168,7 @@ class Experiment:
         num_parameters = sum(p.numel() for p in self._model.parameters())
         self._exp_conf.num_parameters = num_parameters
         self._log.info(f'Number of model parameters {num_parameters}')
-        self._optimizer = torch.optim.Adam(
+        self._optimizer = torch.optim.AdamW(
             self._model.parameters(), lr=self._exp_conf.learning_rate)
         if ckpt_opt is not None:
             self._optimizer.load_state_dict(ckpt_opt)
@@ -202,7 +227,7 @@ class Experiment:
 
         # Datasets
         train_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'train_dev.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'train.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=True
@@ -235,7 +260,7 @@ class Experiment:
             train_dataset,
             sampler=train_sampler,
             np_collate=False,
-            length_batch=True,
+            mof_batch=True,
             batch_size=self._exp_conf.batch_size if not self._exp_conf.use_ddp else self._exp_conf.batch_size // self.ddp_info['world_size'],
             shuffle=False,
             num_workers=num_workers,
@@ -246,7 +271,7 @@ class Experiment:
             valid_dataset,
             sampler=valid_sampler,
             np_collate=False,
-            length_batch=True,
+            mof_batch=True,
             batch_size=1,
             shuffle=False,
             num_workers=0,
@@ -495,6 +520,17 @@ class Experiment:
 
         pred_rot_score = model_out['rot_score'] * diffuse_mask[..., None]
 
+        # Plot histogram of rot_score
+        if self._use_wandb and self._exp_conf.plot_rot_score:
+            gt_rot_score_cp = gt_rot_score.clone()
+            pred_rot_score_cp = pred_rot_score.clone()
+
+            hist_logs = {
+                'rot_score_hist': wandb.Histogram(gt_rot_score_cp.view(-1, 3).detach().cpu().numpy(), num_bins=50),
+                'rot_score_pred_hist': wandb.Histogram(pred_rot_score_cp.view(-1, 3).detach().cpu().numpy(), num_bins=50),
+            }
+            wandb.log(hist_logs, step=self.trained_steps)
+
         # Rotation loss
         if self._exp_conf.separate_rot_loss:
             gt_rot_angle = torch.norm(gt_rot_score, dim=-1, keepdim=True)
@@ -518,6 +554,26 @@ class Experiment:
             angle_loss *= self._exp_conf.rot_loss_weight
             angle_loss *= batch['t'] > self._exp_conf.rot_loss_t_threshold
             rot_loss = angle_loss + axis_loss
+        elif self._exp_conf.rot_mat_loss:
+            gt_rot_vec = batch['rot_update']                                        # [B, M, 3]
+            gt_rot_mat = so3_utils.Exp(gt_rot_vec)                                  # [B, M, 3, 3]
+            pred_rot_vec = model_out['rot_pred']                                    # [B, M, 3]
+            pred_rot_mat = so3_utils.Exp(pred_rot_vec)                              # [B, M, 3, 3]
+    
+            # Frobenius norm 
+            R_diff = torch.matmul(gt_rot_mat, pred_rot_mat.transpose(-1, -2))       # [B, M, 3, 3]
+            identity = torch.eye(3, device=R_diff.device)[None, None, :, :]         # [1, 1, 3, 3]
+            rot_loss = torch.norm(R_diff - identity, p='fro', dim=[-2, -1])         # [B, M], Frobenius norm
+            rot_loss = rot_loss.mean(dim=-1)                                        # [B,]
+        elif self._exp_conf.rot_mat_cosine_loss: 
+            gt_rot_vec = batch['rot_update']                                        # [B, M, 3]
+            gt_rot_mat = so3_utils.Exp(gt_rot_vec)                                  # [B, M, 3, 3]
+            pred_rot_vec = model_out['rot_pred']                                    # [B, M, 3]
+            pred_rot_mat = so3_utils.Exp(pred_rot_vec)                              # [B, M, 3, 3]
+
+            # Cosine embedding loss
+            rot_loss = rotation_matrix_cosine_loss(gt_rot_mat, pred_rot_mat)
+            rot_loss = rot_loss.mean(dim=-1)                                        # [B,]
         else:
             rot_mse = (gt_rot_score - pred_rot_score)**2 * loss_mask[..., None]
             rot_loss = torch.sum(

@@ -114,7 +114,7 @@ class MOFDataset(data.Dataset):
             start_idx += num_atoms
         
         x_t = torch.cat(x_t, dim=0).float()
-        return x_t, rot_score.astype(np.float32), rot_score_scaling.astype(np.float32)
+        return x_t, rot_score.astype(np.float32), rot_score_scaling.astype(np.float32), rot_update.astype(np.float32)
 
     def visualize(self, data, cart_coords, atom_types, t):
         lattice = Lattice.from_parameters(*data.lengths[0], *data.angles[0])
@@ -152,8 +152,11 @@ class MOFDataset(data.Dataset):
         atom_types = torch.cat([bb.atom_types for bb in data.pyg_mols]) 
 
         # apply random noise
-        t = np.random.uniform(self._data_conf.min_t, 1.0)
-        x_t, rot_score, rot_score_scaling = self.noise_transform(x_0, t, num_bb_atoms)
+        if self.data_conf.fix_t:
+           t = self.data_conf.fix_t
+        else: 
+            t = np.random.uniform(self._data_conf.min_t, 1.0)
+        x_t, rot_score, rot_score_scaling, rot_update = self.noise_transform(x_0, t, num_bb_atoms)
 
         ##### Visualization ##### 
         # self.visualize(data, x_0, atom_types, 0)
@@ -164,6 +167,7 @@ class MOFDataset(data.Dataset):
         feats['x_t'] = x_t
         feats['rot_score'] = rot_score
         feats['rot_score_scaling'] = rot_score_scaling
+        feats['rot_update'] = rot_update
 
         feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms

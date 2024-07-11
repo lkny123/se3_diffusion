@@ -4,28 +4,41 @@ defaults:
 data:
   cluster_path: null
   cache_dir: ${oc.env:PROJECT_ROOT}/data/mof/cif_inf_100
+  fix_t: null # null for regular training 
 
 diffuser:
   diffuse_rot: True
 
+  # SO(3) diffuser arguments
+  so3:
+    num_omega: 1000
+    num_sigma: 1000
+    min_sigma: 0.03
+    max_sigma: 1.55
+    schedule: logarithmic
+    cache_dir: .cache/
+    use_cached_score: False
+
 experiment:
-  name: mof_translation
+  name: t_is_${data.fix_t}
   seed: 42
 
   # training mode
   use_ddp: False
   # Take early checkpoint at step 100. Helpful for catching eval bugs early.
-  early_ckpt: False
+  early_ckpt: True
 
   # Training arguments
   log_freq: 1000
   num_epoch: 4000
-  batch_size: 8
-  learning_rate: 1e-3
-  max_squared_res: 50000 # adjust this instead of batch size 
+  batch_size: 64
+  learning_rate: 1e-4
+  max_squared_res: 100000 # adjust this instead of batch size 
   rot_loss_t_threshold: 0.0
   rot_loss_weight: 1.0
   separate_rot_loss: False
+  rot_mat_loss: False
+  rot_mat_cosine_loss: True
   sample_mode: time_batch
   aux_loss_weight: null
   
@@ -35,13 +48,16 @@ experiment:
   project: TEST
 
   # How many steps to checkpoint between.
-  ckpt_freq: 10000
+  ckpt_freq: 500
+
+  # Plot score histogram
+  plot_rot_score: False
 
 model:
   max_radius: .inf
-  max_neighbors: 100
+  max_neighbors: 50
   max_atoms: 100
-  cross_max_distance: 80
+  rbf_max: 30
   time_dim: 256
   hidden_dim: 512
   act_fn: silu

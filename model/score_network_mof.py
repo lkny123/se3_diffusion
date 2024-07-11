@@ -210,6 +210,7 @@ class ScoreNetwork(nn.Module):
 
         pred_out = {
             'rot_score': rot_score,
+            'rot_pred': rot_pred,
         }
 
         return pred_out
