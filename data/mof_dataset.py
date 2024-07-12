@@ -102,12 +102,9 @@ class MOFDataset(data.Dataset):
         x_t = []
         for i, num_atoms in enumerate(num_bb_atoms):
             bb_coords = x_0[start_idx:start_idx+num_atoms]
-            print(f"bb_coords: {bb_coords}")
             bb_centroid = torch.mean(bb_coords, dim=0, keepdim=True)
             bb_rot_mat = du.quat_to_rotmat(rot_update[i])
-            print(f"bb_rot_mat: {bb_rot_mat}")
             x_bb_t = (bb_coords - bb_centroid) @ bb_rot_mat.T + bb_centroid
-            print(f"x_bb_t: {x_bb_t}")
 
             x_t.append(x_bb_t)
             start_idx += num_atoms
