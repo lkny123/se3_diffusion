@@ -83,6 +83,39 @@ class MOFDataset(data.Dataset):
         cart_coords = frac_to_cart_coords(frac_coords, data.lengths, data.angles, data.num_atoms)
         return cart_coords
 
+    def transform(self, x_0, rigids_t, num_bb_atoms):
+        """
+        Transform x_0 by rigids_t
+        Args:
+            x_0: [num_atoms, 3], ground truth coordinates
+            rigids_t: [num_components, 7], rigid transformations
+            num_bb_atoms: [num_components,], number of atoms in each building block
+
+        Returns:
+            x_t: [num_atoms, 3]
+        """
+        num_components = len(num_bb_atoms)
+        rot_update = rigids_t[:, :4]                    # [num_components, 4]
+
+        # update conformation
+        start_idx = 0
+        x_t = []
+        for i, num_atoms in enumerate(num_bb_atoms):
+            bb_coords = x_0[start_idx:start_idx+num_atoms]
+            print(f"bb_coords: {bb_coords}")
+            bb_centroid = torch.mean(bb_coords, dim=0, keepdim=True)
+            bb_rot_mat = du.quat_to_rotmat(rot_update[i])
+            print(f"bb_rot_mat: {bb_rot_mat}")
+            x_bb_t = (bb_coords - bb_centroid) @ bb_rot_mat.T + bb_centroid
+            print(f"x_bb_t: {x_bb_t}")
+
+            x_t.append(x_bb_t)
+            start_idx += num_atoms
+        
+        x_t = torch.cat(x_t, dim=0).float()
+        return {'x_t': x_t}
+
+    
     def noise_transform(self, x_0, t, num_bb_atoms):
         """
         Args:
@@ -106,7 +139,7 @@ class MOFDataset(data.Dataset):
         x_t = [] 
         for i, num_atoms in enumerate(num_bb_atoms):
             bb_coords = x_0[start_idx:start_idx+num_atoms]          # [num_bb_atoms, 3]
-            bb_centroid = torch.mean(x_0, dim=0, keepdim=True)      # [1, 3]
+            bb_centroid = torch.mean(bb_coords, dim=0, keepdim=True)      # [1, 3]
             bb_rot_mat = du.rotvec_to_matrix(rot_update[i])
             x_bb_t = (bb_coords - bb_centroid) @ bb_rot_mat.T + bb_centroid
 
@@ -114,7 +147,14 @@ class MOFDataset(data.Dataset):
             start_idx += num_atoms
         
         x_t = torch.cat(x_t, dim=0).float()
-        return x_t, rot_score.astype(np.float32), rot_score_scaling.astype(np.float32), rot_update.astype(np.float32)
+
+        diff_feats_t = {
+            'x_t': x_t,
+            'rot_score': rot_score.astype(np.float32),
+            'rot_score_scaling': rot_score_scaling.astype(np.float32),
+            'rot_update': rot_update.astype(np.float32)
+        }
+        return diff_feats_t
 
     def visualize(self, data, cart_coords, atom_types, t):
         lattice = Lattice.from_parameters(*data.lengths[0], *data.angles[0])
@@ -152,11 +192,21 @@ class MOFDataset(data.Dataset):
         atom_types = torch.cat([bb.atom_types for bb in data.pyg_mols]) 
 
         # apply random noise
-        if self.data_conf.fix_t:
-           t = self.data_conf.fix_t
-        else: 
-            t = np.random.uniform(self._data_conf.min_t, 1.0)
-        x_t, rot_score, rot_score_scaling, rot_update = self.noise_transform(x_0, t, num_bb_atoms)
+        if self._is_training:
+            if self.data_conf.fix_t:
+                t = self.data_conf.fix_t
+            else: 
+                t = np.random.uniform(self._data_conf.min_t, 1.0)
+            diff_feats_t = self.noise_transform(x_0, t, num_bb_atoms)                   # x_t, rot_score, rot_score_scaling, rot_update
+        else:
+            t = 1.0
+            rigids_t = self.diffuser.sample_ref(
+                n_samples=len(num_bb_atoms),
+                impute=None,
+                diffuse_mask=None,
+                as_tensor_7=True
+            )
+            diff_feats_t = self.transform(x_0, rigids_t['rigids_t'], num_bb_atoms)      # x_t
 
         ##### Visualization ##### 
         # self.visualize(data, x_0, atom_types, 0)
@@ -164,10 +214,7 @@ class MOFDataset(data.Dataset):
         #########################
 
         feats['t'] = t
-        feats['x_t'] = x_t
-        feats['rot_score'] = rot_score
-        feats['rot_score_scaling'] = rot_score_scaling
-        feats['rot_update'] = rot_update
+        feats.update(diff_feats_t)
 
         feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms
