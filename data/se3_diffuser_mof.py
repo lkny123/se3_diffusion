@@ -35,10 +35,10 @@ class SE3Diffuser:
         self._se3_conf = se3_conf
 
         self._diffuse_rot = se3_conf.diffuse_rot
-        self._so3_diffuser = so3_diffuser.SO3Diffuser(self._se3_conf.so3)
+        self._so3_diffuser = so3_diffuser_mof.SO3Diffuser(self._se3_conf.so3)
 
         self._diffuse_trans = se3_conf.diffuse_trans
-        self._r3_diffuser = r3_diffuser.R3Diffuser(self._se3_conf.r3)
+        self._r3_diffuser = r3_diffuser_mof.R3Diffuser(self._se3_conf.r3)
 
     def forward_marginal(
             self,
@@ -159,7 +159,8 @@ class SE3Diffuser:
 
     def reverse(
             self,
-            rigid_t: ru.Rigid,
+            x_t: np.ndarray,
+            num_bb_atoms: np.ndarray,
             rot_score: np.ndarray,
             trans_score: np.ndarray,
             t: float,
@@ -171,47 +172,47 @@ class SE3Diffuser:
         """Reverse sampling function from (t) to (t-1).
 
         Args:
-            rigid_t: [..., N] protein rigid objects at time t.
-            rot_score: [..., N, 3] rotation score.
-            trans_score: [..., N, 3] translation score.
+            x_t: [..., N, 3] noised MOF coordinates at time t.
+            num_bb_atoms: [..., M] number of atoms per buildling block.
+            rot_score: [..., M, 3] rotation score.
+            trans_score: [..., M, 3] translation score.
             t: continuous time in [0, 1].
             dt: continuous step size in [0, 1].
-            mask: [..., N] which residues to update.
+            mask: [..., N] which coordinates to update.
             center: true to set center of mass to zero after step
 
         Returns:
-            rigid_t_1: [..., N] protein rigid objects at time t-1.
+            x_t_1: [..., N, 3] denoised MOF coordinates at time t-1.
         """
-        trans_t, rot_t = _extract_trans_rots(rigid_t)
         if not self._diffuse_rot:
-            rot_t_1 = rot_t
+            rot_perturb = rot_t         # TODO: identity rotation
         else:
-            rot_t_1 = self._so3_diffuser.reverse(
-                rot_t=rot_t,
+            rot_perturb = self._so3_diffuser.reverse(
                 score_t=rot_score,
                 t=t,
                 dt=dt,
                 noise_scale=noise_scale,
                 )
-        if not self._diffuse_trans:
-            trans_t_1 = trans_t
-        else:
-            trans_t_1 = self._r3_diffuser.reverse(
-                x_t=trans_t,
-                score_t=trans_score,
-                t=t,
-                dt=dt,
-                center=center,
-                noise_scale=noise_scale
-                )
 
-        if diffuse_mask is not None:
-            trans_t_1 = self._apply_mask(
-                trans_t_1, trans_t, diffuse_mask[..., None])
-            rot_t_1 = self._apply_mask(
-                rot_t_1, rot_t, diffuse_mask[..., None])
+        # apply rototranslation to x_t
+        start_idx = 0
+        x_t_1 = []
+        for i, num_atoms in enumerate(num_bb_atoms[0]):
+            bb_coords = x_t[:, start_idx:start_idx+num_atoms]           # [B, num_bb_atoms, 3]
+            bb_centroid = np.mean(bb_coords, axis=1, keepdims=True)     # [B, 1, 3]
+            bb_rot_mat = du.rotvec_to_matrix(rot_perturb[:, i])         # [B, 3, 3]
 
-        return _assemble_rigid(rot_t_1, trans_t_1)
+            # apply rotation
+            bb_coords_centered = bb_coords - bb_centroid                
+            bb_coords_rotated = np.einsum('bij,bkj->bki', bb_rot_mat, bb_coords_centered)
+            x_bb_t = bb_coords_rotated + bb_centroid                    
+
+            x_t_1.append(x_bb_t)
+            start_idx += num_atoms
+        
+        x_t_1 = np.concatenate(x_t_1, axis=1)
+
+        return torch.Tensor(x_t_1)
 
     def sample_ref(
             self,

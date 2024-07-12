@@ -329,7 +329,6 @@ class SO3Diffuser:
 
     def reverse(
             self,
-            rot_t: np.ndarray,
             score_t: np.ndarray,
             t: float,
             dt: float,
@@ -339,7 +338,6 @@ class SO3Diffuser:
         """Simulates the reverse SDE for 1 step using the Geodesic random walk.
 
         Args:
-            rot_t: [..., 3] current rotations at time t.
             score_t: [..., 3] rotation score at time t.
             t: continuous time in [0, 1].
             dt: continuous step size in [0, 1].
@@ -356,11 +354,5 @@ class SO3Diffuser:
         perturb = (g_t ** 2) * score_t * dt + g_t * np.sqrt(dt) * z
 
         if mask is not None: perturb *= mask[..., None]
-        n_samples = np.cumprod(rot_t.shape[:-1])[-1]
 
-        # Right multiply.
-        rot_t_1 = du.compose_rotvec(
-            rot_t.reshape(n_samples, 3),
-            perturb.reshape(n_samples, 3)
-        ).reshape(rot_t.shape)
-        return rot_t_1
+        return perturb
