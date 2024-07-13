@@ -187,30 +187,15 @@ class ScoreNetwork(nn.Module):
             t=input_feats['t'],
             x_t=input_feats['x_t'],
         )
-        node_embed = rearrange(node_embed, 'b n d -> (b n) d', b=batch_size, n=num_atoms)
-
-        # Compute edge indices 
-        x_t = rearrange(input_feats['x_t'], 'b n d -> (b n) d', b=batch_size, n=num_atoms)
-        batch_vec = torch.arange(batch_size, device=x_t.device).repeat_interleave(num_atoms)
-        edge_index = radius_graph(
-            x=x_t, r=self._model_conf.max_radius, batch=batch_vec, max_num_neighbors=self._model_conf.max_neighbors
-        )
-
-        # Extract edge features
-        row, col = edge_index
-        batch_indices = batch_vec[row]
-        edge_embed = edge_embed[batch_indices, row % num_atoms, col % num_atoms] # [num_edges, D_edge]
         
         # Run main network 
-        model_out = self.score_model(node_embed, x_t, edge_index, edge_embed, input_feats)
-
-        # Compute scores
-        rot_pred = model_out['rot_pred'] # [B, M, 3]
-        rot_score = self.diffuser._so3_diffuser.torch_score(rot_pred, input_feats['t'])
+        model_out = self.score_model(node_embed, input_feats['x_t'], edge_embed, input_feats)
 
         pred_out = {
-            'rot_score': rot_score,
-            'rot_pred': rot_pred,
+            'rot_pred': model_out['rot_pred'],
+            'rot_score': model_out['rot_score'],
+            'trans_pred': None
+            'trans_score': None,
         }
 
         return pred_out
