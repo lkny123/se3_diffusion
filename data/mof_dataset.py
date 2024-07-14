@@ -164,6 +164,41 @@ class MOFDataset(data.Dataset):
         cif_path = os.path.join(f'{data.m_id}_{t}.cif')
         cif_writer = CifWriter(structure)
         cif_writer.write_file(cif_path)
+
+    def get_bond_matrix(self, data):
+        """
+        Returns:
+            bond_matrix: [num_atoms, num_atoms], one indicating bond between atoms
+        """
+
+        bond_matrix = torch.zeros(data.num_atoms, data.num_atoms)
+
+        start_idx = 0
+        for bb in data.pyg_mols:
+            edge_index = bb.edge_index
+            if bb.edge_index.shape[0] != 0:
+                edge_index = edge_index + start_idx
+                bond_matrix[edge_index[0], edge_index[1]] = 1
+
+            start_idx += bb.num_atoms
+
+        return bond_matrix
+
+    def get_bb_matrix(self, num_atoms, num_bb_atoms):
+        """
+        Returns:
+            bb_matrix: [num_atoms, num_atoms], one indicating connection within the same building block
+        """
+
+        bb_matrix = torch.zeros(num_atoms, num_atoms)
+
+        start_idx = 0
+        for num_atom in num_bb_atoms:
+            end_idx = start_idx + num_atom
+            bb_matrix[start_idx:end_idx, start_idx:end_idx] = 1
+            start_idx = end_idx
+        
+        return bb_matrix
     
     def __len__(self):
         return len(self.cached_data)
@@ -216,6 +251,7 @@ class MOFDataset(data.Dataset):
         feats['atom_types'] = atom_types
         feats['num_atoms'] = data.num_atoms
         feats['num_bb_atoms'] = num_bb_atoms
+        feats['lattice'] = torch.cat([data.lengths, data.angles], dim=1)
 
         feats['res_mask'] = torch.ones(data.num_components)
         feats['fixed_mask'] = torch.zeros(data.num_components)
