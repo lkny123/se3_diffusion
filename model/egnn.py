@@ -6,7 +6,7 @@ from openfold.utils.rigid_utils import Rigid
 
 
 class EGNNScore(nn.Module):
-    def __init__(self, model_conf, diffuser, residual=True, attention=False, normalize=False, tanh=False):
+    def __init__(self, model_conf, diffuser):
         super(EGNNScore, self).__init__()
         self._model_conf = model_conf
 
@@ -35,11 +35,14 @@ class EGNNScore(nn.Module):
                     update_coors=False,
                     valid_radius=model_conf.max_radius,
                     m_pool_method='sum',
-                    soft_edge=False,
+                    soft_edges=False,
                     coor_weights_clamp_value=None
                 )
             )
+
         self.final_layer = nn.Linear(model_conf.node_embed_size, 3)
+        # nn.init.zeros_(self.final_layer.weight)
+        # nn.init.zeros_(self.final_layer.bias)
 
     def forward(self, h, x, edge_attr, input_feats):
         batch_size, num_atoms = input_feats['atom_types'].shape
@@ -47,7 +50,7 @@ class EGNNScore(nn.Module):
         # obtain node embeddings 
         x = self.scale_pos(x)
         for i in range(len(self.egnn)):
-            h, x = self.egnn[i](feats=h, coors=x, edges=edge_attr)          # [B, N, D]
+            h, x = self.egnn[i](feats=h, coors=x, edges=edge_attr)                                  # [B, N, D]
 
         # output layer
         num_bb_atoms = input_feats['num_bb_atoms'][0]
@@ -57,7 +60,7 @@ class EGNNScore(nn.Module):
             rot_pred.append(h[:, start_idx:start_idx+num_atom, :].mean(dim=1))
             start_idx += num_atom
         rot_pred = torch.stack(rot_pred, dim=1)
-        rot_pred = self.final_layer(rot_pred)                               # [B, M, 3]
+        rot_pred = self.final_layer(rot_pred)                                                   # [B, M, 3]
 
         #  Compute scores
         rot_score = self.diffuser._so3_diffuser.torch_score(rot_pred, input_feats['t'])

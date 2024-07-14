@@ -50,19 +50,18 @@ class Embedder(nn.Module):
         self._model_conf = model_conf
         self._embed_conf = model_conf.embed
 
-        # Time step embedding
-        index_embed_size = self._embed_conf.index_embed_size
-        t_embed_size = index_embed_size
-        node_embed_dims = t_embed_size 
-        edge_in = (t_embed_size) * 2
+        # Embedding dimensions 
+        t_embed_dim = self._embed_conf.time_embed_dim
+        atom_type_embed_dim = self._embed_conf.atom_type_embed_dim
+        edge_dist_embed_dim = self._embed_conf.edge_dist_embed_dim
 
-        # Sequence index embedding
-        node_embed_dims += index_embed_size
-        edge_in += index_embed_size
+        # Compute input dimensions
+        node_embed_in = t_embed_dim + atom_type_embed_dim
+        edge_embed_in = 2 * t_embed_dim + edge_dist_embed_dim
 
         node_embed_size = self._model_conf.node_embed_size
         self.node_embedder = nn.Sequential(
-            nn.Linear(node_embed_dims, node_embed_size),
+            nn.Linear(node_embed_in, node_embed_size),
             nn.ReLU(),
             nn.Linear(node_embed_size, node_embed_size),
             nn.ReLU(),
@@ -72,7 +71,7 @@ class Embedder(nn.Module):
 
         edge_embed_size = self._model_conf.edge_embed_size
         self.edge_embedder = nn.Sequential(
-            nn.Linear(edge_in, edge_embed_size),
+            nn.Linear(edge_embed_in, edge_embed_size),
             nn.ReLU(),
             nn.Linear(edge_embed_size, edge_embed_size),
             nn.ReLU(),
@@ -82,12 +81,12 @@ class Embedder(nn.Module):
 
         self.timestep_embedder = fn.partial(
             get_timestep_embedding,
-            embedding_dim=self._embed_conf.index_embed_size
+            embedding_dim=t_embed_dim
         )
-        self.atom_embedder = nn.Embedding(model_conf.max_atoms, index_embed_size)
+        self.atom_type_embedder = nn.Embedding(model_conf.max_atoms, atom_type_embed_dim)
 
         # RBF for embedding edge distances
-        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.rbf_max, index_embed_size)
+        self.edge_distance_embedder = GaussianSmearing(0.0, model_conf.rbf_max, edge_dist_embed_dim)
 
     def _cross_concat(self, feats_1d, num_batch, num_atoms):
         return torch.cat([
@@ -133,11 +132,11 @@ class Embedder(nn.Module):
         pair_feats = [self._cross_concat(time_emb, num_batch, num_atoms)] # [B, N^2, 2*D]
 
         # Atom type embeddings
-        node_feats.append(self.atom_embedder(atom_types - 1))
+        node_feats.append(self.atom_type_embedder(atom_types - 1))
 
         # Edge radius embeddings
-        pairwise_dist = self._pairwise_distances(x_t) # [B, N, N]
-        edge_feats = self.edge_distance_embedder(pairwise_dist) # [B*N*N, D]
+        pairwise_dist = self._pairwise_distances(x_t)                                   # [B, N, N]
+        edge_feats = self.edge_distance_embedder(pairwise_dist)                         # [B*N*N, D]
         pair_feats.append(rearrange(edge_feats, '(B N1 N2) D -> B (N1 N2) D', B=num_batch, N1=num_atoms, N2=num_atoms))
 
         node_embed = self.node_embedder(torch.cat(node_feats, dim=-1).float())
@@ -194,7 +193,7 @@ class ScoreNetwork(nn.Module):
         pred_out = {
             'rot_pred': model_out['rot_pred'],
             'rot_score': model_out['rot_score'],
-            'trans_pred': None
+            'trans_pred': None,
             'trans_score': None,
         }
 
