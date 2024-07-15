@@ -38,6 +38,9 @@ from torch.nn import DataParallel as DP
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn import functional as F
 import torch.distributed as dist
+from pymatgen.core.structure import Structure
+from pymatgen.core.lattice import Lattice
+from pymatgen.io.cif import CifWriter
 from openfold.utils import rigid_utils as ru
 from hydra.core.hydra_config import HydraConfig
 
@@ -45,7 +48,7 @@ from analysis import utils as au
 from analysis import metrics
 from data import mof_dataset
 from data import mof_dataset_pyg
-from data import se3_diffuser
+from data import se3_diffuser_mof
 from data import utils as du
 from data import so3_utils
 from data import all_atom
@@ -157,7 +160,7 @@ class Experiment:
             self.set_seed(self._exp_conf.seed)
 
         # Initialize experiment objects
-        self._diffuser = se3_diffuser.SE3Diffuser(self._diff_conf)
+        self._diffuser = se3_diffuser_mof.SE3Diffuser(self._diff_conf)
         self._model = score_network_mof.ScoreNetwork(
             self._model_conf, self.diffuser)
 
@@ -168,7 +171,7 @@ class Experiment:
         num_parameters = sum(p.numel() for p in self._model.parameters())
         self._exp_conf.num_parameters = num_parameters
         self._log.info(f'Number of model parameters {num_parameters}')
-        self._optimizer = torch.optim.AdamW(
+        self._optimizer = torch.optim.Adam(
             self._model.parameters(), lr=self._exp_conf.learning_rate)
         if ckpt_opt is not None:
             self._optimizer.load_state_dict(ckpt_opt)
@@ -227,7 +230,7 @@ class Experiment:
 
         # Datasets
         train_dataset = mof_dataset.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'train.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'train_dev.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=True
@@ -427,7 +430,10 @@ class Experiment:
                 eval_dir = os.path.join(
                     self._exp_conf.eval_dir, f'step_{self.trained_steps}')
                 os.makedirs(eval_dir, exist_ok=True)
-                ckpt_metrics = self.eval_fn(valid_loader, device)
+                ckpt_metrics, cif_paths = self.eval_fn(
+                    eval_dir, valid_loader, device,
+                    noise_scale=self._exp_conf.noise_scale
+                )
                 eval_time = time.time() - start_time
                 self._log.info(f'Finished evaluation in {eval_time:.2f}s')
             else:
@@ -458,6 +464,8 @@ class Experiment:
                 if ckpt_metrics is not None:
                     wandb_logs['eval_time'] = eval_time
                     wandb_logs.update(ckpt_metrics)
+                    for i, cif_path in enumerate(cif_paths):
+                        wandb_logs[f'cif_{i}'] = wandb.Molecule(cif_path)
 
                 wandb.log(wandb_logs, step=self.trained_steps)
 
@@ -472,27 +480,56 @@ class Experiment:
         if return_logs:
             return global_logs
 
-    def eval_fn(self, valid_loader, device):
-        log_losses = defaultdict(list)
-        for valid_feats in tqdm(valid_loader, desc=f"Epoch {self.trained_epochs} Eval"):
-            try:
-                valid_feats = tree.map_structure(
-                    lambda x: x.to(device), valid_feats
-                )
-                _, val_aux_data = self.loss_fn(valid_feats)
-                for k,v in val_aux_data.items():
-                    log_losses[k].append(du.move_to_np(v))
-            except RuntimeError as e:
-                self._log.warning(f'Failed evaluation: {e}')
+    def eval_fn(self, eval_dir, valid_loader, device, min_t=None, num_t=None, noise_scale=1.0):
+        # log_losses = defaultdict(list)
+        cif_paths = []
+        for i, valid_feats in tqdm(enumerate(valid_loader), desc=f"Epoch {self.trained_epochs} Eval", total=len(valid_loader)):
+            if i >= self._data_conf.num_eval_samples:
+                break
+
+            valid_feats = tree.map_structure(
+                lambda x: x.to(device), valid_feats
+            )
+
+            # Compute loss
+            # _, val_aux_data = self.loss_fn(valid_feats)
+            # for k,v in val_aux_data.items():
+            #         log_losses[k].append(du.move_to_np(v))
+
+            # Run inference
+            infer_out = self.inference_fn(
+                valid_feats, min_t=min_t, num_t=num_t, noise_scale=noise_scale
+            )
+            final_mof = infer_out['mof_traj'][0].squeeze()                                  # [B, N, 3] -> [N, 3]
+
+            # Create structure
+            atom_types = valid_feats['atom_types'].squeeze().detach().cpu().numpy()          # [B, N] -> [N,]
+            lattice = valid_feats['lattice'].squeeze().detach().cpu().numpy()                
+            structure = Structure(
+                lattice=Lattice.from_parameters(*lattice),
+                species=atom_types,
+                coords=final_mof,
+                coords_are_cartesian=True
+            )
+
+            # Write structure
+            cif_path = os.path.join(eval_dir, f'{i}.cif')
+            writer = CifWriter(structure)
+            writer.write_file(cif_path)
+            cif_paths.append(cif_path)
+
+        # log_losses = tree.map_structure(np.mean, log_losses)
+
+        # ckpt_metrics = {
+        #     'val_loss': np.mean(log_losses['total_loss']),
+        #     'val_rot_loss': np.mean(log_losses['rot_loss']),
+        # }
         
-        log_losses = tree.map_structure(np.mean, log_losses)
-
         ckpt_metrics = {
-            'val_loss': np.mean(log_losses['total_loss']),
-            'val_rot_loss': np.mean(log_losses['rot_loss']),
+            'val_loss': 0,
         }
-
-        return ckpt_metrics
+        
+        return ckpt_metrics, cif_paths
 
     def loss_fn(self, batch):
         """Computes loss and auxiliary data.
@@ -554,6 +591,7 @@ class Experiment:
             angle_loss *= self._exp_conf.rot_loss_weight
             angle_loss *= batch['t'] > self._exp_conf.rot_loss_t_threshold
             rot_loss = angle_loss + axis_loss
+        
         elif self._exp_conf.rot_mat_loss:
             gt_rot_vec = batch['rot_update']                                        # [B, M, 3]
             gt_rot_mat = so3_utils.Exp(gt_rot_vec)                                  # [B, M, 3, 3]
@@ -563,8 +601,9 @@ class Experiment:
             # Frobenius norm 
             R_diff = torch.matmul(gt_rot_mat, pred_rot_mat.transpose(-1, -2))       # [B, M, 3, 3]
             identity = torch.eye(3, device=R_diff.device)[None, None, :, :]         # [1, 1, 3, 3]
-            rot_loss = torch.norm(R_diff - identity, p='fro', dim=[-2, -1])         # [B, M], Frobenius norm
+            rot_loss = torch.norm(R_diff - identity, p='fro', dim=[-2, -1])         # [B, M]
             rot_loss = rot_loss.mean(dim=-1)                                        # [B,]
+        
         elif self._exp_conf.rot_mat_cosine_loss: 
             gt_rot_vec = batch['rot_update']                                        # [B, M, 3]
             gt_rot_mat = so3_utils.Exp(gt_rot_vec)                                  # [B, M, 3, 3]
@@ -574,7 +613,9 @@ class Experiment:
             # Cosine embedding loss
             rot_loss = rotation_matrix_cosine_loss(gt_rot_mat, pred_rot_mat)
             rot_loss = rot_loss.mean(dim=-1)                                        # [B,]
-        else:
+        
+        else: 
+            # score loss
             rot_mse = (gt_rot_score - pred_rot_score)**2 * loss_mask[..., None]
             rot_loss = torch.sum(
                 rot_mse / rot_score_scaling[:, None, None]**2,
@@ -615,38 +656,6 @@ class Experiment:
         beta_t = beta_t[..., None, None]
         cond_var = 1 - torch.exp(-beta_t)
         return (trans_score * cond_var + trans_t) / torch.exp(-1/2*beta_t)
-
-    def compute_coords(self, input_feats, rigid=None):
-
-        x_bb = input_feats['x_bb'][0]  # [N, 3]
-        num_bb_atoms = input_feats['num_bb_atoms'][0]
-
-        start_idx = 0
-        x_pred = []
-
-        # Deal with different types of rigid
-        if rigid is not None:
-            pred_rigid = ru.Rigid.from_tensor_7(rigid) if isinstance(rigid, torch.Tensor) else rigid # [1, M, 7]
-            pred_rigid._rots = pred_rigid._rots.to(x_bb.device, dtype=x_bb.dtype)
-            pred_rigid._trans = pred_rigid._trans.to(x_bb.device)
-        else:
-            pred_rigid = ru.Rigid.from_tensor_7(input_feats['rigids_t']) # [1, M, 7]
-
-        # Rototranslate each building block 
-        for i, num_bb_atom in enumerate(num_bb_atoms):
-            bb_coord = x_bb[start_idx:start_idx + num_bb_atom, :]  # [num_bb_atom, 3]
-            rot_mats = pred_rigid[:, i]._rots.get_rot_mats()  # [1, 3, 3]
-            trans = pred_rigid[:, i]._trans[:, None, :]  # [1, 1, 3]
-            
-            # Apply rotation and translation
-            pred_coord = torch.einsum('bij,nj->bni', rot_mats, bb_coord) + trans  # [1, num_bb_atom, 3]
-            
-            x_pred.append(pred_coord)
-            start_idx += num_bb_atom
-
-        x_pred = torch.cat(x_pred, dim=1)  # [1, N, 3]
-
-        return x_pred # [1, N, 3]
     
     def _set_t_feats(self, feats, t, t_placeholder):
         feats['t'] = t * t_placeholder
@@ -683,75 +692,51 @@ class Experiment:
 
         # Run reverse process.
         sample_feats = copy.deepcopy(data_init)
-        device = sample_feats['rigids_t'].device
-        if sample_feats['rigids_t'].ndim == 2:
+        device = sample_feats['x_t'].device
+        if sample_feats['x_t'].ndim == 2:
             t_placeholder = torch.ones((1,)).to(device)
         else:
             t_placeholder = torch.ones(
-                (sample_feats['rigids_t'].shape[0],)).to(device)
+                (sample_feats['x_t'].shape[0],)).to(device)
         if num_t is None:
             num_t = self._data_conf.num_t
         if min_t is None:
             min_t = self._data_conf.min_t
         reverse_steps = np.linspace(min_t, 1.0, num_t)[::-1]
         dt = 1/num_t
-        all_rigids = [du.move_to_np(copy.deepcopy(sample_feats['rigids_t']))]
-        all_bb_prots = []
-        all_trans_0_pred = []
-        all_bb_0_pred = []
+        all_mofs = []
         with torch.no_grad():
             for t in reverse_steps:
-                if t > min_t:
-                    sample_feats = self._set_t_feats(sample_feats, t, t_placeholder)
-                    model_out = self.model(sample_feats)
-                    rot_score = model_out['rot_score']
-                    trans_score = model_out['trans_score']
-                    rigid_pred = model_out['rigids']
-                    fixed_mask = sample_feats['fixed_mask'] * sample_feats['res_mask']
-                    diffuse_mask = (1 - sample_feats['fixed_mask']) * sample_feats['res_mask']
-                    rigids_t = self.diffuser.reverse(
-                        rigid_t=ru.Rigid.from_tensor_7(sample_feats['rigids_t']),
-                        rot_score=du.move_to_np(rot_score),
-                        trans_score=du.move_to_np(trans_score),
-                        diffuse_mask=du.move_to_np(diffuse_mask),
-                        t=t,
-                        dt=dt,
-                        center=center,
-                        noise_scale=noise_scale,
-                    )
-                else:
-                    model_out = self.model(sample_feats)
-                    rigids_t = ru.Rigid.from_tensor_7(model_out['rigids'])
-                sample_feats['rigids_t'] = rigids_t.to_tensor_7().to(device)
-                if aux_traj:
-                    all_rigids.append(du.move_to_np(rigids_t.to_tensor_7()))
+                model_out = self.model(sample_feats)
+                rot_score = model_out['rot_score']
+                rot_pred = model_out['rot_pred']
+                trans_score = model_out['trans_score']
+                trans_pred = model_out['trans_pred']
+                fixed_mask = sample_feats['fixed_mask'] * sample_feats['res_mask']
+                diffuse_mask = (1 - sample_feats['fixed_mask']) * sample_feats['res_mask']
 
-                # Calculate x0 prediction derived from score predictions.
-                gt_trans_0 = sample_feats['rigids_t'][..., 4:]
-                pred_trans_0 = rigid_pred[..., 4:]
-                trans_pred_0 = diffuse_mask[..., None] * pred_trans_0 + fixed_mask[..., None] * gt_trans_0
-                if aux_traj:
-                    mof_0 = self.compute_coords(sample_feats, rigid_pred)
-                    all_bb_0_pred.append(du.move_to_np(mof_0))
-                    all_trans_0_pred.append(du.move_to_np(trans_pred_0))
-                mof_t = self.compute_coords(sample_feats, rigids_t)
-                all_bb_prots.append(du.move_to_np(mof_t))
+                x_t = self.diffuser.reverse(
+                    x_t=du.move_to_np(sample_feats['x_t']),
+                    num_bb_atoms=du.move_to_np(sample_feats['num_bb_atoms']),
+                    rot_score=du.move_to_np(rot_score),
+                    trans_score=None,
+                    diffuse_mask=du.move_to_np(diffuse_mask),
+                    t=t,
+                    dt=dt,
+                    center=center,
+                    noise_scale=noise_scale,
+                )
+                    
+                sample_feats['x_t'] = x_t.to(device)
+                all_mofs.append(du.move_to_np(x_t))
 
         # Flip trajectory so that it starts from t=0.
         # This helps visualization.
         flip = lambda x: np.flip(np.stack(x), (0,))
-        all_bb_prots = flip(all_bb_prots)
-        if aux_traj:
-            all_rigids = flip(all_rigids)
-            all_trans_0_pred = flip(all_trans_0_pred)
-            all_bb_0_pred = flip(all_bb_0_pred)
+        all_mofs = flip(all_mofs)
         ret = {
-            'mof_traj': all_bb_prots,
+            'mof_traj': all_mofs,
         }
-        if aux_traj:
-            ret['rigid_traj'] = all_rigids
-            ret['trans_traj'] = all_trans_0_pred
-            ret['rigid_0_traj'] = all_bb_0_pred
         return ret
 
 

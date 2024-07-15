@@ -244,6 +244,7 @@ class Experiment:
             config=dict(eu.flatten_dict(conf_dict)),
             dir=self._exp_conf.wandb_dir,
         )
+        wandb.watch(self.model, log='all', log_freq=100)
         self._exp_conf.run_id = wandb.util.generate_id()
         self._exp_conf.wandb_dir = wandb.run.dir
         self._log.info(

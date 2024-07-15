@@ -330,6 +330,7 @@ def write_checkpoint(
         step,
         logger=None,
         use_torch=True,
+        remove_prev_ckpt=False
     ):
     """Serialize experiment state and stats to a pickle file.
 
@@ -343,9 +344,10 @@ def write_checkpoint(
         preds: Model predictions to be written as part of checkpoint.
     """
     ckpt_dir = os.path.dirname(ckpt_path)
-    for fname in os.listdir(ckpt_dir):
-        if '.pkl' in fname or '.pth' in fname:
-            os.remove(os.path.join(ckpt_dir, fname))
+    if remove_prev_ckpt:
+        for fname in os.listdir(ckpt_dir):
+            if '.pkl' in fname or '.pth' in fname:
+                os.remove(os.path.join(ckpt_dir, fname))
     if logger is not None:
         logger.info(f'Serializing experiment state to {ckpt_path}')
     else:

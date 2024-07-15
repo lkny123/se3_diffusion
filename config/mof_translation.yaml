@@ -5,6 +5,7 @@ data:
   cluster_path: null
   cache_dir: ${oc.env:PROJECT_ROOT}/data/mof/cif_inf_100
   fix_t: null # null for regular training 
+  num_eval_samples: 10
 
 diffuser:
   diffuse_rot: True
@@ -48,17 +49,30 @@ experiment:
   project: TEST
 
   # How many steps to checkpoint between.
-  ckpt_freq: 500
+  ckpt_freq: 10000
 
   # Plot score histogram
   plot_rot_score: False
 
 model:
   max_radius: .inf
+  max_intra_radius: 5.0
+  max_inter_radius: 30.0
   max_neighbors: 50
   max_atoms: 100
-  rbf_max: 30
+  rbf_max: 80
   time_dim: 256
   hidden_dim: 512
   act_fn: silu
   n_layers: 3
+  dropout: 0.1
+  
+  # Embedding arguments
+  embed:
+    time_embed_dim: 64
+    atom_type_embed_dim: 64
+    edge_dist_embed_dim: 64
+    bb_embed_dim: 64
+    num_bins: 22
+    min_bin: 1e-5
+    max_bin: 20.0
