@@ -36,6 +36,7 @@ from omegaconf import DictConfig
 from omegaconf import OmegaConf
 from torch.nn import DataParallel as DP
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn import functional as F
 import torch.distributed as dist
 from openfold.utils import rigid_utils as ru
 from hydra.core.hydra_config import HydraConfig
@@ -46,9 +47,30 @@ from data import mof_dataset_rigid
 from data import se3_diffuser
 from data import utils as du
 from data import all_atom
+from data import so3_utils
 from model import score_network_mof_rigid
 from experiments import utils as eu
 from common.utils import PROJECT_ROOT
+
+
+def rotation_matrix_cosine_loss(R_pred, R_true):
+    """
+    Args:
+        R_pred: (*, 3, 3).
+        R_true: (*, 3, 3).
+    Returns:
+        Per-matrix losses, (*, ).
+    """
+    size = list(R_pred.shape[:-2])
+    ncol = R_pred.numel() // 3
+
+    RT_pred = R_pred.transpose(-2, -1).reshape(ncol, 3) # (ncol, 3)
+    RT_true = R_true.transpose(-2, -1).reshape(ncol, 3) # (ncol, 3)
+
+    ones = torch.ones([ncol, ], dtype=torch.long, device=R_pred.device)
+    loss = F.cosine_embedding_loss(RT_pred, RT_true, ones, reduction='none')  # (ncol*3, )
+    loss = loss.reshape(size + [3]).sum(dim=-1)    # (*, )
+    return loss
 
 
 class Experiment:
@@ -127,9 +149,9 @@ class Experiment:
                 self.trained_steps = ckpt_pkl['step']
 
         # # Seed
-        # if self._exp_conf.seed is not None:
-        #     self._log.info(f'Setting seed to {self._exp_conf.seed}')
-        #     self.set_seed(self._exp_conf.seed)
+        if self._exp_conf.seed is not None:
+            self._log.info(f'Setting seed to {self._exp_conf.seed}')
+            self.set_seed(self._exp_conf.seed)
 
         # Initialize experiment objects
         self._diffuser = se3_diffuser.SE3Diffuser(self._diff_conf)
@@ -143,7 +165,7 @@ class Experiment:
         num_parameters = sum(p.numel() for p in self._model.parameters())
         self._exp_conf.num_parameters = num_parameters
         self._log.info(f'Number of model parameters {num_parameters}')
-        self._optimizer = torch.optim.AdamW(
+        self._optimizer = torch.optim.Adam(
             self._model.parameters(), lr=self._exp_conf.learning_rate)
         if ckpt_opt is not None:
             self._optimizer.load_state_dict(ckpt_opt)
@@ -202,7 +224,7 @@ class Experiment:
 
         # Datasets
         train_dataset = mof_dataset_rigid.MOFDataset(
-            cache_path=os.path.join(self._data_conf.cache_dir, 'train.pt'),
+            cache_path=os.path.join(self._data_conf.cache_dir, 'train_dev.pt'),
             data_conf=self._data_conf,
             diffuser=self._diffuser,
             is_training=True
@@ -345,6 +367,9 @@ class Experiment:
         self._optimizer.zero_grad()
         loss, aux_data = self.loss_fn(data)
         loss.backward()
+        # # print gradient
+        # for name, param in self.model.named_parameters():
+        #     print(name, param.grad)
         self._optimizer.step()
         return loss, aux_data
 
@@ -630,6 +655,15 @@ class Experiment:
             angle_loss *= self._exp_conf.rot_loss_weight
             angle_loss *= batch['t'] > self._exp_conf.rot_loss_t_threshold
             rot_loss = angle_loss + axis_loss
+        elif self._exp_conf.cosine_loss: 
+            gt_rigid = ru.Rigid.from_tensor_7(batch['rigids_0'])                   
+            gt_rot_mat = gt_rigid.get_rots().get_rot_mats()                         # [B, M, 3, 3]
+            pred_rigid = ru.Rigid.from_tensor_7(model_out['rigids'])              
+            pred_rot_mat = pred_rigid.get_rots().get_rot_mats()                     # [B, M, 3, 3]
+
+            # Cosine embedding loss
+            rot_loss = rotation_matrix_cosine_loss(gt_rot_mat, pred_rot_mat)
+            rot_loss = rot_loss.mean(dim=-1)
         else:
             rot_mse = (gt_rot_score - pred_rot_score)**2 * loss_mask[..., None]
             rot_loss = torch.sum(

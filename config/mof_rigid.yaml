@@ -21,12 +21,13 @@ experiment:
   # Training arguments
   log_freq: 1000
   num_epoch: 95
-  batch_size: 256
+  batch_size: 512
   learning_rate: 0.0001
-  max_squared_res: 300000 # adjust this instead of batch size 
+  max_squared_res: 500000 # adjust this instead of batch size 
   rot_loss_t_threshold: 0.0
   rot_loss_weight: 1.0
-  separate_rot_loss: True
+  separate_rot_loss: False
+  cosine_loss: False
   sample_mode: time_batch
   aux_loss_weight: null
   
@@ -57,9 +58,8 @@ model:
   # Embedding arguments
   embed:
     time_embed_dim: 64
-    bb_embed_dim: 64
+    bb_embed_dim: 32
     edge_dist_embed_dim: 64
-    fingerprint_dim: 4096
     num_bins: 22
     min_bin: 1e-5
     max_bin: 20.0

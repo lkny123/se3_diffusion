@@ -161,7 +161,7 @@ class MOFDataset(data.Dataset):
         feats['num_atoms'] = data.num_atoms
         feats['num_bb_atoms'] = num_bb_atoms
         feats['lattice'] = torch.cat([data.lengths, data.angles], dim=1)
-        feats['fingerprint'] = torch.stack([bb.fp for bb in data.bbs], dim=0).float()       # (n_bbs, 4096)
+        feats['bb_emb'] = torch.stack([bb.emb for bb in data.bbs], dim=0)       # (n_bbs, 32)
         feats['rigids_0'] = rigids_0.to_tensor_7()
         feats['sc_ca_t'] = torch.zeros_like(rigids_0.get_trans())
 
