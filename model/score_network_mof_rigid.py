@@ -84,7 +84,7 @@ class Embedder(nn.Module):
             get_timestep_embedding,
             embedding_dim=t_embed_dim
         )
-        self.fingerprint_embedder = nn.Linear(self._embed_conf.fingerprint_dim, bb_embed_dim, bias=False)
+        # self.fingerprint_embedder = nn.Linear(self._embed_conf.fingerprint_dim, bb_embed_dim, bias=False)
 
 
     def _cross_concat(self, feats_1d, num_batch, num_atoms):
@@ -106,7 +106,7 @@ class Embedder(nn.Module):
     def forward(
             self,
             *,
-            fingerprint,
+            bb_emb,
             t,
             fixed_mask,
             self_conditioning_ca,
@@ -122,7 +122,7 @@ class Embedder(nn.Module):
             node_embed: [B, N, D_node]
             edge_embed: [B, N, N, D_edge]
         """
-        num_batch, num_bbs, _ = fingerprint.shape
+        num_batch, num_bbs, _ = bb_emb.shape
         node_feats = []
 
         # Set time step to epsilon=1e-5 for fixed residues.
@@ -134,7 +134,7 @@ class Embedder(nn.Module):
         pair_feats = [self._cross_concat(time_emb, num_batch, num_bbs)] # [B, N^2, 2*D]
 
         # Building block embeddings
-        node_feats.append(self.fingerprint_embedder(fingerprint))                       # [B, N, D]
+        node_feats.append(bb_emb)                                       # [B, N, D]
 
         # Self-conditioning distogram.
         if self._embed_conf.embed_self_conditioning:
@@ -172,16 +172,11 @@ class ScoreNetwork(nn.Module):
         Args:
             X: the noised samples from the noising process, of shape [Batch, N, D].
                 Where the T time steps are t=1,...,T (i.e. not including the un-noised X^0)
-                - t: [B,]
-                - x_t: [B, N, 3]
-                - rot_score: [B, M, 3]
-                - rot_score_scaling: [B,]
-                - atom_types: [B, N]
-                - num_bb_atoms: [B, M]
 
         Returns:
             model_out: dictionary of model outputs.
         """
+
         # Frames as [batch, res, 7] tensors.
         bb_mask = input_feats['res_mask'].type(torch.float32)  # [B, N]
         fixed_mask = input_feats['fixed_mask'].type(torch.float32)
@@ -189,7 +184,7 @@ class ScoreNetwork(nn.Module):
 
         # Initial node and edge embeddings
         init_node_embed, init_edge_embed = self.embedding_layer(
-            fingerprint=input_feats['fingerprint'],
+            bb_emb=input_feats['bb_emb'],
             t=input_feats['t'],
             fixed_mask=fixed_mask,
             self_conditioning_ca=input_feats['sc_ca_t']
