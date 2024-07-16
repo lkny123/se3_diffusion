@@ -70,6 +70,7 @@ experiment:
   # Experiment metadata
   name: baseline
   run_id: null
+  seed: 42
 
   #training mode
   use_ddp : False

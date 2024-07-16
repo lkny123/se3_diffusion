@@ -125,6 +125,10 @@ class Experiment:
             if 'step' in ckpt_pkl:
                 self.trained_steps = ckpt_pkl['step']
 
+        # Seed
+        if self._exp_conf.seed is not None:
+            self._log.info(f'Setting seed to {self._exp_conf.seed}')
+            self.set_seed(self._exp_conf.seed)
 
         # Initialize experiment objects
         self._diffuser = se3_diffuser.SE3Diffuser(self._diff_conf)
@@ -180,6 +184,18 @@ class Experiment:
     @property
     def conf(self):
         return self._conf
+    
+    def set_seed(self, seed=42):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        os.environ['PYTHONHASHSEED'] = str(seed)
+        
+        # Ensuring deterministic behavior in CUDA
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     def create_dataset(self):
 
